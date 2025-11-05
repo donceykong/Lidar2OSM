@@ -1,0 +1,29 @@
+
+
+# Log & dataset directories
+data/logs
+data/datasets
+osm_sem_filtering_tests/data/
+
+# MacOS
+.DS_Store
+
+# Any python cache dirs
+*/__pycache__
+
+# C++
+build
+
+# semantic clipper ignored files
+*.pyc
+*.m~
+.ipynb_checkpoints
+*.npy
+
+# Any wandb logs
+*/wandb
+
+# CE-OSM-Net ignored files
+cenet_osm_pretrained
+cenet_osm_trained
+inference_predictions
