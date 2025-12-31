@@ -17,7 +17,10 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '.')))
 
 # Internal imports
 from lidar2osm.utils.file_io import read_bin_file
-from lidar2osm.utils.osm_handler_new import OSMDataHandler
+from lidar2osm.utils.osm_handler import OSMDataHandler
+from lidar2osm.datasets.cu_multi_dataset import labels as sem_kitti_labels
+from lidar2osm.core.pointcloud import labels2RGB
+from lidar2osm.utils.label_filter import filter_building_labels_with_osm, filter_building_labels_with_osm_fast
 
 
 def load_poses(poses_file):
@@ -209,69 +212,69 @@ def utm_to_latlon(poses):
     return latlon_positions, timestamps
 
 
-# def create_osm_map_with_poses(osm_file, poses_latlon, output_file="robot_poses_on_osm.html"):
-#     """Create an interactive map with OSM data and robot poses."""
+def create_osm_map_with_poses(osm_file, poses_latlon, output_file="robot_poses_on_osm.html"):
+    """Create an interactive map with OSM data and robot poses."""
     
-#     # Extract only lat, lon coordinates for Folium (remove z coordinate)
-#     poses_2d = poses_latlon[:, :2]  # Take only lat, lon columns
+    # Extract only lat, lon coordinates for Folium (remove z coordinate)
+    poses_2d = poses_latlon[:, :2]  # Take only lat, lon columns
     
-#     # Calculate map center from poses
-#     lats = poses_2d[:, 0]
-#     lons = poses_2d[:, 1]
-#     center_lat = np.mean(lats)
-#     center_lon = np.mean(lons)
+    # Calculate map center from poses
+    lats = poses_2d[:, 0]
+    lons = poses_2d[:, 1]
+    center_lat = np.mean(lats)
+    center_lon = np.mean(lons)
     
-#     # Create map
-#     m = folium.Map(
-#         location=[center_lat, center_lon],
-#         zoom_start=18,
-#         tiles='OpenStreetMap'
-#     )
+    # Create map
+    m = folium.Map(
+        location=[center_lat, center_lon],
+        zoom_start=18,
+        tiles='OpenStreetMap'
+    )
     
-#     # Add robot path
-#     folium.PolyLine(
-#         locations=poses_2d,
-#         color='red',
-#         weight=3,
-#         opacity=0.8,
-#         popup='Robot Path'
-#     ).add_to(m)
+    # Add robot path
+    folium.PolyLine(
+        locations=poses_2d,
+        color='red',
+        weight=3,
+        opacity=0.8,
+        popup='Robot Path'
+    ).add_to(m)
     
-#     # Add start and end markers
-#     folium.Marker(
-#         location=poses_2d[0],
-#         popup='Start',
-#         icon=folium.Icon(color='green', icon='play')
-#     ).add_to(m)
+    # Add start and end markers
+    folium.Marker(
+        location=poses_2d[0],
+        popup='Start',
+        icon=folium.Icon(color='green', icon='play')
+    ).add_to(m)
     
-#     folium.Marker(
-#         location=poses_2d[-1],
-#         popup='End',
-#         icon=folium.Icon(color='red', icon='stop')
-#     ).add_to(m)
+    folium.Marker(
+        location=poses_2d[-1],
+        popup='End',
+        icon=folium.Icon(color='red', icon='stop')
+    ).add_to(m)
     
-#     # Add some intermediate markers for reference
-#     num_markers = min(10, len(poses_2d))
-#     step = len(poses_2d) // num_markers
-#     for i in range(0, len(poses_2d), step):
-#         folium.CircleMarker(
-#             location=poses_2d[i],
-#             radius=3,
-#             color='blue',
-#             fill=True,
-#             popup=f'Frame {i}'
-#         ).add_to(m)
+    # Add some intermediate markers for reference
+    num_markers = min(10, len(poses_2d))
+    step = len(poses_2d) // num_markers
+    for i in range(0, len(poses_2d), step):
+        folium.CircleMarker(
+            location=poses_2d[i],
+            radius=3,
+            color='blue',
+            fill=True,
+            popup=f'Frame {i}'
+        ).add_to(m)
     
-#     # Save map
-#     m.save(output_file)
-#     print(f"Map saved to {output_file}")
+    # Save map
+    m.save(output_file)
+    print(f"Map saved to {output_file}")
     
-#     return m
+    return m
 
 
 def create_simple_plot(poses_latlon, poses_dict=None, osm_file=None, show_lidar=False, 
                       dataset_path=None, robot="robot1", environment="main_campus", 
-                      output_file="robot_poses_plot.png"):
+                      output_file="robot_poses_plot.png", show_semantic=False):
     """Create a simple matplotlib plot of the robot path with optional OSM data."""
     
     plt.figure(figsize=(12, 8))
@@ -380,7 +383,10 @@ def create_simple_plot(poses_latlon, poses_dict=None, osm_file=None, show_lidar=
                     plt.arrow(lon, lat, dx_norm, dy_norm, 
                             head_width=0.00002, head_length=0.000015, 
                             fc='darkorange', ec='darkorange', alpha=0.8, zorder=12, width=0.000005)
-    
+
+    from lidar2osm.utils.label_filter import filter_building_labels_alg2
+    filter_building_labels_alg2(osm_handler)
+
     # Add LiDAR scan overlay if requested
     if show_lidar and dataset_path is not None:
         print("Loading and overlaying LiDAR scans...")
@@ -389,12 +395,21 @@ def create_simple_plot(poses_latlon, poses_dict=None, osm_file=None, show_lidar=
             velodyne_path = Path(dataset_path) / environment / robot / "lidar_bin/data"
             velodyne_files = sorted([f for f in velodyne_path.glob("*.bin")])
             
+            # Load semantic labels if requested
+            labels_path = Path(dataset_path) / environment / robot / "lidar_labels"
+            label_files = sorted([f for f in labels_path.glob("*.bin")]) if show_semantic and labels_path.exists() else None
+            
+            # Convert labels to dictionary for coloring
+            labels_dict = {label.id: label.color for label in sem_kitti_labels} if show_semantic else None
+            
             # Sample 500 poses evenly distributed
             total_poses = len(poses_latlon)
             lidar_sample_count = min(500, total_poses)
             lidar_sample_indices = np.linspace(0, total_poses - 1, lidar_sample_count, dtype=int)
             
             print(f"Found {len(velodyne_files)} LiDAR scans, using {lidar_sample_count} poses for overlay")
+            if show_semantic and label_files:
+                print(f"Found {len(label_files)} semantic label files")
             
             # Accumulate point clouds from sampled poses
             all_world_points = []
@@ -406,10 +421,34 @@ def create_simple_plot(poses_latlon, poses_dict=None, osm_file=None, show_lidar=
             for pose_idx in tqdm(lidar_sample_indices, desc="Loading LiDAR scans", unit="scan"):
                 if pose_idx < len(velodyne_files):
                     try:
+                        print(f"\\n\\nProcessing pose {pose_idx}")
+
                         # Load LiDAR scan for this pose
                         points = read_bin_file(velodyne_files[pose_idx], dtype=np.float32, shape=(-1, 4))
+                        print(f"Points shape: {points.shape}")
                         points_xyz = points[:, :3]  # Extract xyz coordinates
                         intensities = points[:, 3]  # Extract intensity
+                        
+                        # Load semantic labels if available
+                        labels = None
+                        if show_semantic and label_files and pose_idx < len(label_files):
+                            try:
+                                labels = read_bin_file(label_files[pose_idx], dtype=np.int32)
+                                print(f"Labels shape: {labels.shape}")
+                                # Ensure labels have the same length as points
+                                if len(labels) != len(points_xyz):
+                                    print(f"Warning: Labels length ({len(labels)}) doesn't match points length "
+                                          f"({len(points_xyz)}) for pose {pose_idx}, truncating to match")
+                                    min_length = min(len(labels), len(points_xyz))
+                                    labels = labels[:min_length]
+                                    points_xyz = points_xyz[:min_length]
+                                    intensities = intensities[:min_length]  
+                                    print(f"After truncation - Points: {len(points_xyz)}, Labels: {len(labels)}")
+                                else:
+                                    print(f"Labels length ({len(labels)}) matches points length ({len(points_xyz)}) for pose {pose_idx}")
+                            except Exception as e:
+                                print(f"Warning: Could not load semantic labels for pose {pose_idx}: {e}")
+                                labels = None
                         
                         # Get pose for this frame
                         if poses_dict is not None:
@@ -435,14 +474,55 @@ def create_simple_plot(poses_latlon, poses_dict=None, osm_file=None, show_lidar=
                                 # Transform points to world coordinates
                                 points_homogeneous = np.hstack([points_xyz, np.ones((points_xyz.shape[0], 1))])
                                 world_points = (transform_matrix @ points_homogeneous.T).T
-                                world_points_xyz = world_points[:, :3]
+                                world_points_xyz_full = world_points[:, :3]
                                 
                                 # Downsample points
-                                world_points_xyz, intensities = voxel_downsample(world_points_xyz, intensities, voxel_size=per_scan_voxel_size)
+                                print(f"Voxel downsampling points with voxel size {per_scan_voxel_size}")
+                                world_points_xyz, intensities = voxel_downsample(world_points_xyz_full, intensities, voxel_size=per_scan_voxel_size)
+                                
+                                # Downsample labels if available
+                                if labels is not None:
+                                    print(f"\\n\\nBefore label downsampling - World points: {len(world_points_xyz_full)}, Labels: {len(labels)}")
+                                    # Ensure labels have the same length as world_points_xyz before downsampling
+                                    # if len(labels) != len(world_points_xyz):
+                                    #     print(f"Warning: Labels length ({len(labels)}) doesn't match world points length ({len(world_points_xyz)}) for pose {pose_idx}, skipping label downsampling")
+                                    #     labels = None
+                                    # else:
+                                    # Apply same voxel downsampling to labels
+                                    print(f"Downsampling labels with voxel size {per_scan_voxel_size}")
+                                    _, labels = voxel_downsample(world_points_xyz_full, labels.astype(np.float32), voxel_size=per_scan_voxel_size)
+                                    labels = labels.astype(np.int32)
+                                    print(f"After label downsampling - Labels: {len(labels)}")
 
-                                # Accumulate points and intensities
+                                    # Filter out labels that are only buildings (ie 50)
+                                    mask = np.isin(labels, [50])
+                                    world_points_xyz = world_points_xyz[mask]
+                                    intensities = intensities[mask]
+                                    labels = labels[mask]
+                                    print(f"After label filtering - Labels: {len(labels)}")
+
+#                                    # TODO: Fix below relabeling to cycle through per building geom
+#                                    # and then filter points that are within a circular radius about the building
+
+                                    # Filter labels that are not within building polygons
+                                    # Relabel building points not within OSM building polygons as vegetation
+                                    if osm_handler is not None and hasattr(osm_handler, 'osm_geometries'):
+                                        labels = filter_building_labels_with_osm_fast(
+                                            world_points_xyz, 
+                                            labels, 
+                                            osm_handler,
+                                            poses_latlon=poses_latlon,
+                                            building_label_id=50,
+                                            vegetation_label_id=70
+                                        )
+                                    
+                                # Accumulate points, intensities, and labels
                                 all_world_points.append(world_points_xyz)
                                 all_intensities.append(intensities)
+                                if labels is not None:
+                                    if 'all_labels' not in locals():
+                                        all_labels = []
+                                    all_labels.append(labels)
                                 
                     except Exception as e:
                         print(f"Error loading LiDAR scan for pose {pose_idx}: {e}")
@@ -452,6 +532,16 @@ def create_simple_plot(poses_latlon, poses_dict=None, osm_file=None, show_lidar=
                 # Combine all point clouds
                 combined_points = np.vstack(all_world_points)
                 combined_intensities = np.hstack(all_intensities)
+                
+                # Combine labels if available
+                combined_labels = None
+                if show_semantic and 'all_labels' in locals() and all_labels:
+                    combined_labels = np.hstack(all_labels)
+                    print(f"Combined labels shape: {combined_labels.shape}")
+                    print(f"Unique labels: {np.unique(combined_labels)}")
+                    print(f"Labels dict keys: {list(labels_dict.keys()) if labels_dict else 'None'}")
+                else:
+                    print("No combined labels available for semantic coloring")
                 
                 print(f"Combined {len(combined_points)} points from {len(all_world_points)} scans")
                 
@@ -479,39 +569,92 @@ def create_simple_plot(poses_latlon, poses_dict=None, osm_file=None, show_lidar=
                 
                 print(f"Downsampled to {len(downsampled_points)} points")
                 
+                # Downsample labels if available (this is the key fix!)
+                if show_semantic and combined_labels is not None:
+                    print(f"Downsampling labels from {len(combined_labels)} to match {len(downsampled_points)} points")
+                    _, downsampled_labels = voxel_downsample(
+                        combined_points, combined_labels.astype(np.float32), voxel_size=global_voxel_size
+                    )
+                    combined_labels = downsampled_labels.astype(np.int32)
+                    print(f"Downsampled labels to {len(combined_labels)} labels")
+                
                 # Convert to lat/lon
                 # from pyproj import Proj, transform # old way
                 # utm_proj = Proj(proj='utm', zone=13, ellps='WGS84')
                 # wgs84_proj = Proj(proj='latlong', ellps='WGS84')
                 # lons, lats = transform(utm_proj, wgs84_proj, 
-                                    #  downsampled_points[:, 0], downsampled_points[:, 1])
+                #                      downsampled_points[:, 0], downsampled_points[:, 1])
                 # new way
                 from pyproj import Transformer
 
                 transformer = Transformer.from_crs("EPSG:32613", "EPSG:4326", always_xy=True)
                 lons, lats = transformer.transform(downsampled_points[:, 0], downsampled_points[:, 1])
 
-                # Normalize intensities for coloring (0-1 range)
-                normalized_intensities = (downsampled_intensities - np.min(downsampled_intensities)) / \
-                                       (np.max(downsampled_intensities) - np.min(downsampled_intensities))
-                
-                # Calculate alpha based on intensity and Z (height)
-                # Higher intensity and higher Z values get higher alpha
-                z_values = downsampled_points[:, 2]  # Z coordinates
-                normalized_z = (z_values - np.min(z_values)) / (np.max(z_values) - np.min(z_values))
-                
-                # Combine intensity and Z for alpha calculation
-                # Weight: 70% intensity, 30% Z height
-                alpha_values = 0.9 * normalized_intensities + 0.1 * normalized_z
-                alpha_values = np.clip(alpha_values, 0.1, 0.9)  # Clamp between 0.1 and 0.9
-                
-                # Plot LiDAR points with intensity coloring and alpha based on intensity+Z
-                scatter = plt.scatter(lons, lats, c=normalized_intensities, s=1.0, alpha=alpha_values, 
-                                    zorder=5, cmap='viridis', vmin=0, vmax=1)
-                
-                # Add colorbar for intensity
-                cbar = plt.colorbar(scatter, ax=plt.gca(), shrink=0.8)
-                cbar.set_label('LiDAR Intensity', rotation=270, labelpad=15)
+                # Determine coloring scheme
+                if show_semantic and combined_labels is not None:
+                    # Use semantic labels for coloring
+                    print("Using semantic labels for point cloud coloring")
+                    print(f"Combined labels shape: {combined_labels.shape}")
+                    print(f"Downsampled points shape: {downsampled_points.shape}")
+                    print(f"Labels dict: {labels_dict}")
+                    
+                    # Get semantic colors
+                    semantic_colors = labels2RGB(combined_labels, labels_dict)
+                    print(f"Semantic colors shape: {semantic_colors.shape}")
+                    print(f"Semantic colors range: [{semantic_colors.min():.3f}, {semantic_colors.max():.3f}]")
+                    
+                    # Calculate alpha based on Z height for semantic points
+                    z_values = downsampled_points[:, 2]
+                    normalized_z = (z_values - np.min(z_values)) / (np.max(z_values) - np.min(z_values))
+                    alpha_values = 0.3 + 0.6 * normalized_z  # Alpha between 0.3 and 0.9 based on height
+                    alpha_values = np.clip(alpha_values, 0.3, 0.9)
+                    
+                    # Plot semantic points with RGB colors
+                    scatter = plt.scatter(lons, lats, c=semantic_colors, s=2.0, alpha=alpha_values, 
+                                        zorder=5)
+                    
+                    # Create a custom legend for semantic classes
+                    unique_labels = np.unique(combined_labels)
+                    legend_elements = []
+                    for label_id in unique_labels[:10]:  # Show top 10 most common classes
+                        if label_id in labels_dict:
+                            color = np.array(labels_dict[label_id]) / 255.0
+                            # Find the label name
+                            label_name = "Unknown"
+                            for label in sem_kitti_labels:
+                                if label.id == label_id:
+                                    label_name = label.name
+                                    break
+                            legend_elements.append(
+                                plt.Line2D([0], [0], marker='o', color='w', markerfacecolor=color, 
+                                            markersize=8, label=label_name)
+                            )
+                    
+                    if legend_elements:
+                        plt.legend(handles=legend_elements, loc='upper left', bbox_to_anchor=(1.05, 1), fontsize=8)
+                else:
+                    # Use intensity coloring (original behavior)
+                    print("Using intensity values for point cloud coloring")
+                    
+                    # Normalize intensities for coloring (0-1 range)
+                    normalized_intensities = (downsampled_intensities - np.min(downsampled_intensities)) / \
+                                           (np.max(downsampled_intensities) - np.min(downsampled_intensities))
+                    
+                    # Calculate alpha based on intensity and Z (height)
+                    z_values = downsampled_points[:, 2]  # Z coordinates
+                    normalized_z = (z_values - np.min(z_values)) / (np.max(z_values) - np.min(z_values))
+                    
+                    # Combine intensity and Z for alpha calculation
+                    alpha_values = 0.9 * normalized_intensities + 0.1 * normalized_z
+                    alpha_values = np.clip(alpha_values, 0.1, 0.9)
+                    
+                    # Plot LiDAR points with intensity coloring
+                    scatter = plt.scatter(lons, lats, c=normalized_intensities, s=1.0, alpha=alpha_values, 
+                                        zorder=5, cmap='viridis', vmin=0, vmax=1)
+                    
+                    # Add colorbar for intensity
+                    cbar = plt.colorbar(scatter, ax=plt.gca(), shrink=0.8)
+                    cbar.set_label('LiDAR Intensity', rotation=270, labelpad=15)
                         
         except Exception as e:
             print(f"Error overlaying LiDAR scans: {e}")
@@ -544,6 +687,8 @@ def main():
     parser = argparse.ArgumentParser(description="Visualize robot poses on OSM map")
     parser.add_argument("--show_lidar", action="store_true", 
                        help="Overlay LiDAR scans on the plot")
+    parser.add_argument("--show_semantic", action="store_true",
+                       help="Use semantic labels for LiDAR point coloring (requires --show_lidar)")
     args = parser.parse_args()
     
     # Hardcoded paths
@@ -587,17 +732,18 @@ def main():
     # Create visualizations
     print("\nCreating visualizations...")
     
-    # # Create interactive map
-    # if osm_file.exists():
-    #     create_osm_map_with_poses(osm_file, poses_latlon)
-    # else:
-    #     # Create map without OSM file
-    #     create_osm_map_with_poses(None, poses_latlon)
+    # Create interactive map
+    if osm_file.exists():
+        create_osm_map_with_poses(osm_file, poses_latlon)
+    else:
+        # Create map without OSM file
+        create_osm_map_with_poses(None, poses_latlon)
     
-    print(f"Dataset path: {dataset_path}, Show LiDAR: {args.show_lidar}")
+    print(f"Dataset path: {dataset_path}, Show LiDAR: {args.show_lidar}, Show Semantic: {args.show_semantic}")
     # Create simple plot with OSM data
     create_simple_plot(poses_latlon, poses, osm_file, show_lidar=args.show_lidar, 
-                      dataset_path=dataset_path, robot=robot, environment=environment)
+                      dataset_path=dataset_path, robot=robot, environment=environment,
+                      show_semantic=args.show_semantic)
     
     print("\nDone! Check the generated files:")
     print("- robot_poses_on_osm.html (interactive map)")
