@@ -276,6 +276,10 @@ def main():
     import argparse
     parser = argparse.ArgumentParser(description="Create offset polygons for OSM buildings")
 
+    # Dataset path
+    parser.add_argument("--dataset_path", type=str, required=True,
+                       help="Path to dataset root")
+
     # Environment name
     parser.add_argument("--environment", type=str, default="kittredge_loop",
                        help="Environment name (default: main_campus)")
@@ -292,7 +296,7 @@ def main():
     args = parser.parse_args()
     
     # Hardcoded paths (same as in building_offset_example.py)
-    dataset_path = "/media/donceykong/donceys_data_ssd/datasets/CU_MULTI/data"
+    dataset_path = args.dataset_path
     environment = args.environment
     robots = ["robot1", "robot2", "robot3", "robot4"]  # Can be extended to multiple robots
     

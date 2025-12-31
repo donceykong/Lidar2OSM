@@ -680,21 +680,15 @@ def accumulate_lidar_scans(dataset_path,
 
     velodyne_path = Path(dataset_path) / environment / robot / "lidar_bin/data"
     velodyne_files = sorted([f for f in velodyne_path.glob("*.bin")])
-
-    # labels_path = Path(dataset_path) / environment / robot / f"{robot}_{environment}_lidar_labels"
-    labels_path = Path(dataset_path) / environment / robot / f"{robot}_{environment}_lidar_labels_confidence"
-    label_conf_path = Path(labels_path) / f"confidence_scores"
-    # labels_path = Path(dataset_path) / environment / robot / f"{robot}_{environment}_new_inferred_lidar_labels"
-
+    labels_path = Path(dataset_path) / environment / robot / f"{robot}_{environment}_lidar_labels"
     label_files = sorted([f for f in labels_path.glob("*.bin")]) if labels_path.exists() else None
-    label_conf_files = sorted([f for f in label_conf_path.glob("*.bin")]) if label_conf_path.exists() else None
 
     if not label_files:
         print(f"Warning: No semantic label files found in {labels_path}!")
         print(f"  Path exists: {labels_path.exists()}")
         return 0
     
-    print(f"Found {len(velodyne_files)} LiDAR scans and {len(label_files)} label files and {len(label_conf_files)} label conf files")
+    print(f"Found {len(velodyne_files)} LiDAR scans and {len(label_files)} label files")
     
     total_scans = min(len(velodyne_files), len(label_files))
     sample_count = min(num_scans, total_scans)
@@ -721,35 +715,12 @@ def accumulate_lidar_scans(dataset_path,
             
             # Load semantic labels (must be loaded before filtering)
             labels = read_bin_file(label_files[pose_idx], dtype=np.int32)
-            label_confs = read_bin_file(label_conf_files[pose_idx], dtype=np.float16)
-                                   
-            # Ensure same length before filtering
-            if len(labels) != len(points_xyz) or len(labels) != len(label_confs):
-                raise ValueError(
-                    f"Length mismatch: labels={len(labels)} points_xyz={len(points_xyz)}, label_confs={len(label_confs)}"
-                )
-                # min_length = min(len(labels), len(points_xyz))
-                # labels = labels[:min_length]
-                # points_xyz = points_xyz[:min_length]
-                # intensities = intensities[:min_length]
-            
-            # Only keep points with a confidence higher than 0.9
-            high_conf_mask = label_confs > 0.99
-            points_xyz = points_xyz[high_conf_mask]
-            labels = labels[high_conf_mask]
-            intensities = intensities[high_conf_mask]
 
-            # # Remove all points beyond max_distance
-            # mask = np.linalg.norm(points_xyz, axis=1) <= max_distance
-            # points_xyz = points_xyz[mask]
-            # labels = labels[mask]
-            # intensities = intensities[mask]
-            
-            # # Remove all points closer than min_distance
-            # mask = np.linalg.norm(points_xyz, axis=1) >= min_distance
-            # points_xyz = points_xyz[mask]
-            # labels = labels[mask]
-            # intensities = intensities[mask]
+            # Ensure same length before filtering
+            if len(labels) != len(points_xyz):
+                raise ValueError(
+                    f"Length mismatch: labels={len(labels)} points_xyz={len(points_xyz)}"
+                )
             
             # Get pose for this frame
             timestamp = timestamps[pose_idx]
@@ -1011,6 +982,10 @@ def main():
     
     parser = argparse.ArgumentParser(description="Create global semantic map from LiDAR scans")
 
+    # Dataset path
+    parser.add_argument("--dataset_path", type=str, required=True,
+                       help="Path to dataset root")
+
     # Environment name (default: main_campus)
     parser.add_argument("--environment", type=str, default="kittredge_loop",
                        help="Environment name (default: main_campus)")
@@ -1050,7 +1025,7 @@ def main():
     args = parser.parse_args()
     
     # Hardcoded paths
-    dataset_path = "/media/donceykong/donceys_data_ssd/datasets/CU_MULTI/data"
+    dataset_path = args.dataset_path
     environment = args.environment
     robots = ["robot1", "robot2", "robot3", "robot4"]
     file_dir = os.path.join(dataset_path, environment, "additional")

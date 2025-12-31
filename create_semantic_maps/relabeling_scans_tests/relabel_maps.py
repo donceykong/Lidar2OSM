@@ -385,7 +385,7 @@ def main():
     parser = argparse.ArgumentParser(description="Relabel LiDAR scans using global semantic map")
 
     # Dataset path
-    parser.add_argument("--dataset_path", type=str, default="/media/donceykong/donceys_data_ssd/datasets/CU_MULTI/data",
+    parser.add_argument("--dataset_path", type=str, required=True,
                        help="Path to dataset root")
 
     # Environment name
@@ -407,7 +407,7 @@ def main():
 
     args = parser.parse_args()
 
-    dataset_path = os.path.join(args.dataset_path)
+    dataset_path = args.dataset_path
     env_path = os.path.join(dataset_path, args.environment)
     file_dir = os.path.join(env_path, "additional") # additional folder contains the global semantic map and other files
     input_global_map_file = os.path.join(file_dir, f"{args.environment}_{args.input_global_map_postfix}.npy")

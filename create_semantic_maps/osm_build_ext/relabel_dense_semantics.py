@@ -1281,7 +1281,7 @@ def main():
     
     parser = argparse.ArgumentParser(description="Relabel dense semantics with OSM data and building offsets")
     
-    parser.add_argument("--dataset_path", type=str, default="/media/donceykong/donceys_data_ssd/datasets/CU_MULTI/data",
+    parser.add_argument("--dataset_path", type=str, required=True,
                        help="Path to dataset root")
 
     # Environment name
@@ -1303,7 +1303,7 @@ def main():
     args = parser.parse_args()
     
     # Construct file paths
-    dataset_path = os.path.join(args.dataset_path)
+    dataset_path = args.dataset_path
     environment = args.environment
     robots = ["robot1", "robot2", "robot3", "robot4"]
     file_dir = os.path.join(dataset_path, environment, "additional")
@@ -1424,6 +1424,7 @@ def main():
     # Combine all poses
     print(f"\n{'='*60}")
     print(f"Combining poses from {len(all_poses_latlon)} robots...")
+    print(f"\n{'='*60}")
     poses_latlon = np.vstack(all_poses_latlon)
     print(f"Total combined poses: {len(poses_latlon)}")
     

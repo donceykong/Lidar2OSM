@@ -13,6 +13,9 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 from scipy.spatial.transform import Rotation as R
 from scipy.spatial import cKDTree
+from tqdm import tqdm
+import pandas as pd
+
 
 # Add project root to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -119,18 +122,8 @@ def plot_semantic_map(points, labels, ax=None, title="Global Semantic Map", alph
     return fig, ax
 
 
-def load_poses(poses_file):
-    """
-    Load UTM poses from CSV file.
-    
-    Args:
-        poses_file: Path to CSV file with poses
-    
-    Returns:
-        poses: Dictionary mapping timestamp to [x, y, z, qx, qy, qz, qw]
-    """
-    import pandas as pd
-    
+def load_poses(poses_file) -> dict[float, list[float]]:
+    """Load UTM poses into a dictionary from CSV file."""
     print(f"\nLoading poses from {poses_file}")
     
     try:
@@ -182,7 +175,7 @@ def transform_imu_to_lidar(poses):
         poses: Dictionary mapping timestamp to [x, y, z, qx, qy, qz, qw]
     
     Returns:
-        transformed_poses: Dictionary with transformed poses
+        transformed_poses: Dictionary mapping timestamp to [x, y, z, qx, qy, qz, qw] in LiDAR frame
     """
     # IMU to LiDAR transformation (from CU-MULTI calibration)
     IMU_TO_LIDAR_T = np.array([-0.058038, 0.015573, 0.049603])
@@ -263,88 +256,6 @@ def relabel_scan_using_nearest_neighbors(scan_points_world, kdtree, global_map_l
     return refined_labels.astype(np.int32), distances
 
 
-# def relabel_scan_using_nearest_neighbors(scan_points_world, kdtree, global_map_labels, 
-#                                         k_nearest=100,
-#                                         max_distance=2.0,
-#                                         exclude_self=False):
-#     """
-#     Relabel scan points using mode label of nearest neighbors within distance threshold.
-    
-#     For each scan point:
-#     1. Find k_nearest nearest neighbors in the global map
-#     2. Filter to only neighbors within max_distance
-#     3. Optionally exclude the point itself (distance = 0) - useful for map self-relabeling
-#     4. Assign the mode (most common) label from filtered neighbors
-    
-#     Args:
-#         scan_points_world: (N, 3) array of scan points in world frame
-#         kdtree: Pre-built cKDTree for global map points
-#         global_map_labels: (M,) array of global map semantic labels
-#         k_nearest: Number of nearest neighbors to consider (default: 100)
-#         max_distance: Maximum distance for nearest neighbor matching in meters (default: 2.0)
-#         exclude_self: If True, exclude neighbors with distance = 0 (the point itself) (default: False)
-    
-#     Returns:
-#         refined_labels: (N,) array of refined semantic labels for scan
-#         match_distances: (N,) array of minimum distances to nearest neighbors within threshold
-#     """
-#     from tqdm import tqdm
-#     num_points = len(scan_points_world)
-#     refined_labels = np.zeros(num_points, dtype=np.int32)
-#     match_distances = np.full(num_points, np.inf, dtype=np.float32)
-    
-#     # Query k nearest neighbors for all points at once
-#     # Returns distances and indices as 2D arrays: (N, k)
-#     distances_2d, indices_2d = kdtree.query(scan_points_world, k=k_nearest)
-    
-#     # Handle case where kdtree.query returns 1D for k=1
-#     if distances_2d.ndim == 1:
-#         distances_2d = distances_2d.reshape(-1, 1)
-#         indices_2d = indices_2d.reshape(-1, 1)
-    
-#     # Process each scan point
-#     for i in tqdm(range(num_points), desc="Relabeling scan points"):
-#         # Get distances and indices for this point
-#         point_distances = distances_2d[i]
-#         point_indices = indices_2d[i]
-        
-#         # Filter neighbors within max_distance
-#         within_threshold = point_distances <= max_distance
-        
-#         # Optionally exclude the point itself (distance = 0)
-#         if exclude_self:
-#             within_threshold = within_threshold & (point_distances > 1e-6)  # Exclude distance == 0
-        
-#         if not np.any(within_threshold):
-#             # No neighbors within threshold - use the closest neighbor's label even if beyond threshold
-#             # But skip self if exclude_self is True
-#             if exclude_self and len(point_distances) > 1:
-#                 # Use second closest (first is self)
-#                 refined_labels[i] = global_map_labels[point_indices[1]]
-#                 match_distances[i] = point_distances[1]
-#             else:
-#                 refined_labels[i] = global_map_labels[point_indices[0]]
-#                 match_distances[i] = point_distances[0]
-#         else:
-#             # Get indices of neighbors within threshold
-#             valid_indices = point_indices[within_threshold]
-#             valid_distances = point_distances[within_threshold]
-            
-#             # Get labels from valid neighbors
-#             neighbor_labels = global_map_labels[valid_indices]
-            
-#             # Compute mode (most common label) using numpy
-#             unique_labels, counts = np.unique(neighbor_labels, return_counts=True)
-#             mode_label = unique_labels[np.argmax(counts)]
-            
-#             refined_labels[i] = mode_label
-            
-#             # Store minimum distance within threshold
-#             match_distances[i] = valid_distances.min()
-    
-#     return refined_labels, match_distances
-
-
 def save_refined_labels(labels, output_file):
     """
     Save refined labels to binary file.
@@ -360,9 +271,9 @@ def save_refined_labels(labels, output_file):
 
 
 def process_robot_scans(input_global_map_file, dataset_path, environment, robot, 
-                        max_distance=2.0, visualize=False):
+                        max_distance=2.0, visualize=False, num_scans=None):
     """
-    Process all scans for a robot and save refined labels.
+    Process all scans for an individual robot and save refined labels.
     
     Args:
         global_map_file: Path to global semantic map .npy file
@@ -371,15 +282,13 @@ def process_robot_scans(input_global_map_file, dataset_path, environment, robot,
         robot: Robot name
         max_distance: Maximum distance for nearest neighbor matching
         visualize: If True, create visualization for first scan
-    """
-    from tqdm import tqdm
-    
+    """    
     print(f"\n{'='*80}")
     print(f"Processing {robot} in {environment}")
     print(f"{'='*80}")
     
     # Load global semantic map
-    map_points, map_intensities, map_labels = load_global_semantic_map(input_global_map_file)
+    map_points, _, map_labels = load_global_semantic_map(input_global_map_file)
     
     # Build KD tree for global semantic map
     print(f"\nBuilding KD-Tree for {len(map_points)} global map points...")
@@ -420,12 +329,15 @@ def process_robot_scans(input_global_map_file, dataset_path, environment, robot,
     
     # Determine how many scans to process (minimum of lidar files and poses)
     num_scans_to_process = min(len(lidar_files), len(timestamps))
+    if num_scans is not None:
+        num_scans_to_process = min(num_scans, num_scans_to_process)
     
     if len(lidar_files) != len(timestamps):
         print(f"    WARNING: {len(lidar_files)} lidar files but {len(timestamps)} poses")
         pass
     
     # Process each scan
+    # TODO: Reading through the scans is very slow. Need to optimize.
     print(f"\nProcessing {num_scans_to_process} scans with pre-built KD-Tree...")
     for frame_idx in tqdm(range(num_scans_to_process), desc=f"Relabeling {robot} scans"):
         
@@ -442,50 +354,18 @@ def process_robot_scans(input_global_map_file, dataset_path, environment, robot,
         world_points = transform_points_to_world(points_xyz, pose)
         
         # Relabel using nearest neighbors (with pre-built KD-Tree)
-        refined_labels, distances = relabel_scan_using_nearest_neighbors(
+        refined_labels, _ = relabel_scan_using_nearest_neighbors(
             world_points, kdtree, map_labels, max_distance=max_distance
         )
 
-        # Newer method (slower)
-        # refined_labels, distances = relabel_scan_using_nearest_neighbors(
-        #     world_points, kdtree, map_labels, k_nearest=10, max_distance=max_distance, exclude_self=False
-        # )
-        
         # Save refined labels
         output_file = os.path.join(output_dir, os.path.basename(scan_file).replace('.bin', '.bin'))
         save_refined_labels(refined_labels, output_file)
-        
-        # # Visualize first scan if requested
-        # if visualize and frame_idx == 0:
-        #     fig, ax = plt.subplots(figsize=(16, 12))
-        #     plot_semantic_map(map_points, map_labels, ax=ax,
-        #                     title=f"Global Map with {robot} Scan 0 Overlay")
-            
-        #     # Overlay scan with refined labels
-        #     labels_dict = {label.id: label.color for label in sem_kitti_labels}
-        #     scan_colors = labels2RGB(refined_labels, labels_dict)
-            
-        #     ax.scatter(world_points[:, 0], world_points[:, 1], c=scan_colors,
-        #               s=2.0, alpha=0.8, zorder=10, label=f'{robot} Scan 0 (Refined)')
-            
-        #     # Mark robot position
-        #     ax.plot(pose[0], pose[1], 'go', markersize=12, label='Robot Position', zorder=11)
-        #     ax.legend(loc='upper right')
-            
-        #     viz_file = os.path.join(output_dir, f"{robot}_scan_overlay_viz.png")
-        #     plt.tight_layout()
-        #     plt.savefig(viz_file, dpi=300, bbox_inches='tight')
-        #     print(f"\nVisualization saved to {viz_file}")
-        #     plt.close()
     
     # Print summary
     print(f"\n{'='*60}")
     print(f"Summary for {robot}:")
     print(f"  Scans processed: {num_scans_to_process} / {len(lidar_files)} lidar files")
-    # print(f"  Total points processed: {total_points}")
-    # print(f"  Points within {max_distance}m: {total_close_matches} "
-    #       f"({100*total_close_matches/total_points:.1f}%)")
-    # print(f"  Refined labels saved to: {output_dir}")
     print(f"{'='*60}")
 
 
@@ -496,12 +376,11 @@ def main():
     parser = argparse.ArgumentParser(description="Relabel LiDAR scans using global semantic map")
 
     # Dataset path
-    parser.add_argument("--dataset_path", type=str,
-                       default="/media/donceykong/donceys_data_ssd/datasets/CU_MULTI/data",
+    parser.add_argument("--dataset_path", type=str, required=True,
                        help="Path to dataset root")
 
     # Environment name
-    parser.add_argument("--environment", type=str, default="main_campus",
+    parser.add_argument("--environment", type=str, default="kittredge_loop",
                        help="Environment name (default: kittredge_loop)")
 
     # Which robot to process
@@ -509,8 +388,12 @@ def main():
                        help="Robot name (default: process all robots)")
 
     # Input global map file postfix
-    parser.add_argument("--input_global_map_postfix", type=str, default="sem_map_relabeled_utm_knn_smoothed_OSM_FILTERED",
+    parser.add_argument("--input_global_map_postfix", type=str, default="sem_map_orig_confident_knn_smoothed",
                        help="Input file postfix (default: sem_map_orig_utm)")
+
+    # Number of scans to accumulate (default: 2000)
+    parser.add_argument("--num_scans", type=int, default=None,
+                       help="Number of scans to process (default: all scans)")
 
     parser.add_argument("--max_distance", type=float, default=2.0,
                        help="Maximum distance for nearest neighbor matching in meters (default: 2.0)")
@@ -520,7 +403,7 @@ def main():
 
     args = parser.parse_args()
     
-    dataset_path = os.path.join(args.dataset_path)
+    dataset_path = args.dataset_path
     env_path = os.path.join(dataset_path, args.environment)
     file_dir = os.path.join(env_path, "additional") # additional folder contains the global semantic map and other files
     input_global_map_file = os.path.join(file_dir, f"{args.environment}_{args.input_global_map_postfix}.npy")
@@ -547,7 +430,7 @@ def main():
     for robot in robots:
         try:
             process_robot_scans(input_global_map_file, dataset_path, args.environment, robot,
-                              max_distance=args.max_distance, visualize=args.visualize)
+                              max_distance=args.max_distance, visualize=args.visualize, num_scans=args.num_scans)
         except Exception as e:
             print(f"\nError processing {robot}: {e}")
             import traceback
