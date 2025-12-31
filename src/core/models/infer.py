@@ -8,20 +8,28 @@ import subprocess
 from shutil import copyfile
 import yaml
 import sys
+from pathlib import Path
 
 # Internal modules
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from lidar2osm.models.user import User
-from lidar2osm import CONFIG_DIR
-
-def load_yaml(config_path):
-    with open(config_path, "r") as file:
-        config = yaml.safe_load(file)
-    return config
+from lidar2osm.config_loader import find_repo_root, get_config_dir, load_yaml, resolve_path
 
 if __name__ == "__main__":
-    # Default configuration path
-    config = load_yaml(CONFIG_DIR / "inference.yaml")
+    bootstrap = argparse.ArgumentParser(add_help=False)
+    bootstrap.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help="Path to YAML config (default: repo-root config.yaml).",
+    )
+    bootstrap_args, _ = bootstrap.parse_known_args()
+
+    repo_root = find_repo_root(Path(__file__))
+    cfg_dir = get_config_dir(repo_root)
+    base_cfg_path = repo_root / "config.yaml"
+    if bootstrap_args.config:
+        base_cfg_path = Path(bootstrap_args.config)
+    config = load_yaml(base_cfg_path)
 
     # Setup command line arguments
     splits = ["train", "valid", "test"]
@@ -91,6 +99,8 @@ if __name__ == "__main__":
     )
 
     FLAGS, unparsed = parser.parse_known_args()
+    if FLAGS.data_config:
+        FLAGS.data_config = str(resolve_path(FLAGS.data_config, base_dir=cfg_dir.parent))
 
     # print summary of what we will do
     print("----------")
@@ -179,6 +189,8 @@ if __name__ == "__main__":
                 raise
 
             # Create user and infer
+            # Lazy import so `--help` works even if heavy deps (e.g. torch) aren't installed.
+            from lidar2osm.models.user import User
             user = User(ARCH, DATA, FLAGS.dataset_name, FLAGS.dataset_path, FLAGS.model, FLAGS.split)
             user.infer()
 
@@ -196,11 +208,13 @@ if __name__ == "__main__":
             raise
 
         # Single user instance for KITTI (handles sequences internally)
+        from lidar2osm.models.user import User
         user = User(ARCH, DATA, FLAGS.dataset_name, FLAGS.dataset_path, FLAGS.model, FLAGS.split)
         user.infer()
     
     else:
         print(f"Unknown dataset name: {FLAGS.dataset_name}")
         # Try generic inference
+        from lidar2osm.models.user import User
         user = User(ARCH, DATA, FLAGS.dataset_name, FLAGS.dataset_path, FLAGS.model, FLAGS.split)
         user.infer()

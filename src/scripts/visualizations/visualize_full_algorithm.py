@@ -928,7 +928,7 @@ class StatisticsManager:
     
 if __name__ == "__main__":
     # Path to YAML-based ablation config file
-    ablation_config = 'lidar2osm/config/ablation_config.yaml'
+    ablation_config = 'config/internal/ablation_config.yaml'
     with open(ablation_config, 'r') as file:
         ablation_data = yaml.safe_load(file)
     

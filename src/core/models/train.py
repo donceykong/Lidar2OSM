@@ -6,19 +6,13 @@ import argparse
 import os
 import shutil
 from shutil import copyfile
+from pathlib import Path
 import yaml
 import sys
 
 # Internal
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from lidar2osm.models.trainer_wb import Trainer
-from lidar2osm import CONFIG_DIR
-
-
-def load_yaml(config_path):
-    with open(config_path, "r") as file:
-        config = yaml.safe_load(file)
-    return config
+from lidar2osm.config_loader import find_repo_root, get_config_dir, load_yaml, resolve_path
 
 
 def parse_yaml(base_config, model_config):
@@ -146,6 +140,16 @@ def load_config_and_train(FLAGS):
 
 
 if __name__ == "__main__":
+    # Allow overriding the base YAML used to populate defaults.
+    bootstrap = argparse.ArgumentParser(add_help=False)
+    bootstrap.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help="Path to YAML config (default: repo-root config.yaml).",
+    )
+    bootstrap_args, _ = bootstrap.parse_known_args()
+
     # Seed function (unchanged)
     def seed_torch(seed=1024):
         import random
@@ -159,10 +163,12 @@ if __name__ == "__main__":
         torch.cuda.manual_seed(seed)
         print("We use the seed: {}".format(seed))
 
-    seed_torch()
-
-    # Load configuration
-    base_config = load_yaml(CONFIG_DIR / "training.yaml")
+    repo_root = find_repo_root(Path(__file__))
+    cfg_dir = get_config_dir(repo_root)
+    base_cfg_path = repo_root / "config.yaml"
+    if bootstrap_args.config:
+        base_cfg_path = Path(bootstrap_args.config)
+    base_config = load_yaml(base_cfg_path)
     dataset_name = base_config['dataset_name']
 
     # Check for progressive growing first
@@ -181,7 +187,13 @@ if __name__ == "__main__":
             print(f"Training model: {model_cfg}")
             print(f"pretrained_model_path: {current_model_config.get('pretrained_model_path', None)}")
             FLAGS = parse_yaml(base_config, current_model_config)
+            # Resolve any repo-relative config paths from the base/model YAML.
+            FLAGS.arch_cfg = str(resolve_path(FLAGS.arch_cfg, base_dir=cfg_dir.parent))
+            FLAGS.data_cfg = str(resolve_path(FLAGS.data_cfg, base_dir=cfg_dir.parent))
             ARCH, DATA = load_config_and_train(FLAGS)
+            seed_torch()
+            # Lazy import so `--help` works even if heavy deps (e.g. torch) aren't installed.
+            from lidar2osm.models.trainer_wb import Trainer
             trainer = Trainer(ARCH, DATA, dataset_name, FLAGS.dataset, FLAGS.log, FLAGS.pretrained)
             trainer.train()
     # else:

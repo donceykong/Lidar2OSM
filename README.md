@@ -57,6 +57,52 @@ $ python3 -m pip install bindings/python # 'python3 -m' ensures appropriate pip 
 
 A Python example notebook can be found in [`examples`](examples/python).
 
+## Running Lidar2OSM (Python)
+
+This repo uses a standard `src/` Python package layout. Install the package in editable mode once, then you can run scripts/CLI **without** setting `PYTHONPATH`.
+
+### Install (recommended)
+
+```bash
+conda env create -f environment.yaml
+conda activate lidar2osm_env
+python -m pip install -e .
+```
+
+### One-config workflow
+
+Edit the single repo-root config:
+- `config.yaml`
+
+### Run the pipelines
+
+```bash
+# Data relabeling pipeline (runs the existing scripts under src/core/data/)
+lidar2osm --data_pipeline --config config.yaml
+
+# Training
+lidar2osm --training_pipeline --config config.yaml
+
+# Inference
+lidar2osm --inference_pipeline --config config.yaml
+```
+
+You can also use module invocation:
+
+```bash
+python -m lidar2osm --data_pipeline --config config.yaml
+```
+
+### Run individual scripts (still supported)
+
+After `pip install -e .`, you can run these directly without `PYTHONPATH`:
+
+```bash
+python src/core/data/relabel_scans.py --dataset_path "/mnt/semkitti/cu-multi-data/" --num_scans 2
+python src/core/models/train.py --config config.yaml
+python src/core/models/infer.py --config config.yaml
+```
+
 ### Configuring the Build
 
 The following `cmake` options are available when building CLIPPER:
