@@ -1,10 +1,6 @@
-
-- The code in create\_semantic\_maps directory is a bunch of separate scripts I have been experimenting with to create global semantic maps from lidar scans, align with OSM data, and then relabel.
-
 <p align="center">
   <img src="./assets/banner_light.png" alt="banner" height="400">
   <img src="./assets/semantic_clipper.png" alt="banner" height="400">
-  <!-- <img src="assets/lidar2osm_example.gif" width="400" alt="Example of Lidar2OSM goal"> -->
 </p>
 
 # Lidar2OSM: Distributed Urban Mapping with Bandwidth-Efficient Geospatial Descriptors 📡🗺️🤖
@@ -23,39 +19,7 @@ This repository includes the `semantic_clipper` project, which is based on work 
 
 ## CU-MULTI Dataset
 
-<!-- There are a limited number of datasets available that use a mobile ground-based robot in urban scenarios with both accurate GPS data, lidar, and IMU. It is for this reason we demonstrate our findings on two major on-road datasets, KITTI-360 and NuScenes. However, we fill this gap with the CU-MULTI Dataset, a multimodal dataset collected in an off-road urban environment containing **INSERT NUMBER** LiDAR scans and 6,235 images. -->
-
 There are a limited number of datasets available that use a mobile ground-based robot in urban scenarios with both accurate GPS data, lidar, and IMU. It is for this reason we demonstrate our findings on two major on-road datasets, KITTI-360 and NuScenes. However, we fill this gap with the CU-MULTI Dataset, a multi-robot dataset collected in an off-road urban environment consisting of two large environments on the University of Colorado Boulder's Main Campus.
-
-## Map-matching with Semantic-CLIPPER
-### Building/Installing Semantic-CLIPPER
-
-In order to make use of semantic-clipper, you will need to build it using `cmake`:
-
-```bash
-$ cd semantic_clipper
-$ mkdir build
-$ cd build
-$ cmake ..
-$ make
-$ sudo make install
-```
-
-Once successful, the C++ tests can be run with `./test/tests` (if `-DBUILD_TESTS=ON` is added to `cmake ..` command).
-
-### Installing Python Bindings and use within the supplied Conda env
-
-If Python bindings are built (see configuration options below), then the `semantic_clipper` Python module will need to be installed before using. This can be done with
-
-```bash
-$ cd semantic_clipper/build
-$ make pip-install
-
-# or directly using pip (e.g., to control which python version)
-$ python3 -m pip install bindings/python # 'python3 -m' ensures appropriate pip version is used
-```
-
-A Python example notebook can be found in [`examples`](examples/python).
 
 ## Running Lidar2OSM (Python)
 
@@ -95,31 +59,17 @@ python -m lidar2osm --data_pipeline --config config.yaml
 
 ### Run individual scripts (still supported)
 
-After `pip install -e .`, you can run these directly without `PYTHONPATH`:
+After `pip install -e .`, you can run the underlying scripts directly:
 
 ```bash
-python src/core/data/relabel_scans.py --dataset_path "/mnt/semkitti/cu-multi-data/" --num_scans 2
+# Data pipeline scripts
+python src/core/data/create_global_sem_map_octree.py --dataset_path /mnt/semkitti/cu-multi-data/ --num_scans 10 --global_voxel 0.1
+python src/core/data/extend_building_offsets.py --dataset_path /mnt/semkitti/cu-multi-data/
+python src/core/data/relabel_maps.py --dataset_path /mnt/semkitti/cu-multi-data/
+python src/core/data/relabel_dense_semantics.py --dataset_path /mnt/semkitti/cu-multi-data/
+python src/core/data/relabel_scans.py --dataset_path "/mnt/semkitti/cu-multi-data/"
+
+# Model Testing
 python src/core/models/train.py --config config.yaml
 python src/core/models/infer.py --config config.yaml
 ```
-
-### Configuring the Build
-
-The following `cmake` options are available when building CLIPPER:
-
-| Option                  | Description | Default |
-|-------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------|
-| `BUILD_BINDINGS_PYTHON` | Uses [`pybind11`](https://github.com/pybind/pybind11) to create Python bindings for CLIPPER                                                                                     | `ON`    |
-| `BUILD_BINDINGS_MATLAB` | Attempts to build MEX files which are required for the MATLAB examples. A MATLAB installation is required. Gracefully fails if not found.                                     | `OFF`    |
-| `BUILD_TESTS`           | Builds C++ tests                                                                                                                                                                | `OFF`    |
-| `BUILD_BENCHMARKS`      | Builds C++ timing benchmarks                                                                                                                                                                | `OFF`    |
-| `ENABLE_MKL`            | Attempts to use [Intel MKL](https://software.intel.com/content/www/us/en/develop/tools/oneapi/components/onemkl.html) (if installed) with Eigen for accelerated linear algebra. | `OFF`   |
-| `ENABLE_BLAS`           | Attempts to use a BLAS with Eigen for accelerated linear algebra.                                                                                                               | `OFF`   |
-
-**Note:** The options `ENABLE_MKL` and `ENABLE_BLAS` are mutually exclusive.
-
-These `cmake` options can be set using the syntax `cmake -DENABLE_MKL=ON ..` or using the `ccmake .` command (both from the `build` dir).
-
-### Testing Semantic-CLIPPER on data
-
-There are example scripts to test the semantic-CLIPPER algorithm in examples/semantic_clipper.
