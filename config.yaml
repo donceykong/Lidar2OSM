@@ -1,0 +1,41 @@
+# Primary user-facing config.
+#
+# Goal: this should be the ONLY config most users ever need to edit.
+# Everything under `config/` is treated as internal defaults (labels, arch, etc).
+
+# Shared
+dataset_path: "/mnt/semkitti/cu-multi-data/"
+dataset_name: CU-MULTI  # "KITTI-360" or "CU-MULTI"
+
+# Dataset/model “data config” used by training/inference scripts.
+# (This replaces having to edit `config/internal/data_cfg_*.yaml`.)
+data_config: config/internal/data_cfg_cu_multi.yaml
+
+data_pipeline:
+  dataset_path: "/mnt/semkitti/cu-multi-data/"
+  create_global_sem_map_octree:
+    num_scans: 1
+  relabel_scans:
+    num_scans: 2
+
+training:
+  model_path: "models"
+  model_name: cenet_osm-512
+  use_progressive_growing: true
+
+  model_configs:
+    cenet_osm-512:
+      arch_config: config/arch/train/cenet_osm-512.yaml
+      model_name: cenet_osm-512
+    cenet_osm-1024:
+      arch_config: config/arch/train/cenet_osm-1024p.yaml
+      model_name: cenet_osm-1024
+      pretrained_model_path: "models/cenet_osm-512"
+    cenet_osm-2048:
+      arch_config: config/arch/train/cenet_osm-2048p.yaml
+      model_name: cenet_osm-2048
+      pretrained_model_path: "models/cenet_osm-1024"
+
+inference:
+  model_path: "models/inference_model"
+  split: test  # "valid", "train", or "test"
