@@ -6,11 +6,10 @@
   - Use the `octree` subcommand (default) to accumulate `.bin` scans + inferred labels.
   - Use `voxel` to merge GT labeled `.pcd` scans.
   - Both strategies support saving to `.ply` (colored point cloud) and `.npy` (numpy array of points+colors/labels) via `--output-ply` and `--output-npy` arguments.
-- **create_global_gt_map_octree.py** and **create_global_gt_map_voxel.py** are legacy wrappers that forward to `create_global_map.py`.
-- **extract_per_scan_semantics.py** can be used once a global gt semantic map is made, I then find semantics for all scans that have a GT pose associated with it in the sequence's GT pose csv (pose_inW.csv).
+- **extract_perscan_semantics.py** extracts per-scan semantic labels from a global GT map (.npy). Requires `--scan_dir`, `--pose_file`, `--merged_npy`, and `--output_dir`. Supports parallel processing via `--jobs`.
 
 #### Visualization
-- **plot_bin_map_semantic.py** will create a global semantic map using the GT semantics (.bin) we extracted using **extract_per_scan_semantics.py** above. It will also save a .ply for viewing later of if desired.
+- **plot_bin_map_semantic.py** will create a global semantic map using the GT semantics (.bin) extracted via **extract_perscan_semantics.py**. Saves a .ply for viewing.
 - **plot_pcd_map.py** will create a global semantic map using the GT pcd files that the dataset ships with. It will also save a ply file.
 
 #### OSM alignment
