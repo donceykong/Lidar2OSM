@@ -1,12 +1,15 @@
 # MCD Utility Scripts
 
-These files will need some love and reorg at some point.
-
+#### Functional
 - **binarize_ros2_lidar.py** was used to binarize the lidar scans from a ROS2 bag. I used rosbags-convert to convert the ROS1 bags to ROS2.
-- **create_global_gt_map_octree.py** was used to create the global semantic map (saved as a .npy file). It uses day_06, day_09, and night_05 from KTH environment- all scans with ground-truth pcd files. It works totally fine for now, but the octree approach does eat up ram. Additionally **create_global_gt_map_voxel.py** does the same thing.
+- **create_global_map.py** is the unified entrypoint for creating a global semantic map. 
+  - Use the `octree` subcommand (default) to accumulate `.bin` scans + inferred labels.
+  - Use `voxel` to merge GT labeled `.pcd` scans.
+  - Both strategies support saving to `.ply` (colored point cloud) and `.npy` (numpy array of points+colors/labels) via `--output-ply` and `--output-npy` arguments.
+- **create_global_gt_map_octree.py** and **create_global_gt_map_voxel.py** are legacy wrappers that forward to `create_global_map.py`.
 - **extract_per_scan_semantics.py** can be used once a global gt semantic map is made, I then find semantics for all scans that have a GT pose associated with it in the sequence's GT pose csv (pose_inW.csv).
 
-for visualization:
+#### Visualization
 - **plot_bin_map_semantic.py** will create a global semantic map using the GT semantics (.bin) we extracted using **extract_per_scan_semantics.py** above. It will also save a .ply for viewing later of if desired.
 - **plot_pcd_map.py** will create a global semantic map using the GT pcd files that the dataset ships with. It will also save a ply file.
 
