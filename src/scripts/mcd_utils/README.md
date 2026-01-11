@@ -1,6 +1,8 @@
 # MCD Utility Scripts
 
-#### Functional
+#### Custom MCD Annotation Pipeline (under `mcd_annotation/`).
+The following scripts were used to create the interpolated ground truth data. In essence, we use an annotated global map as the source of truth and map underlying point clouds to this map for relabeling. This enables creating a training dataset beyond the key-frames alone.
+
 - **Step 1: binarize_ros2_lidar.py** was used to binarize the lidar scans from a ROS2 bag. I used rosbags-convert to convert the ROS1 bags to ROS2.
 - **Step 2: create_global_map.py** is the unified entrypoint for creating a global semantic map. 
   - Use the `octree` subcommand (default) to accumulate `.bin` scans + inferred labels.
@@ -8,12 +10,13 @@
   - Both strategies support saving to `.ply` (colored point cloud) and `.npy` (numpy array of points+colors/labels) via `--output-ply` and `--output-npy` arguments.
 - **Step 3: extract_perscan_semantics.py** extracts per-scan semantic labels from a global GT map (.npy). Requires `--scan_dir`, `--pose_file`, `--merged_npy`, and `--output_dir`. Supports parallel processing via `--jobs`.
 
-#### Visualization
+To view the annotated point clouds, the following script can be used to see how well the above methods work for annotating the underlying MCD data.
+
 - **visualization/plot_semantic_map.py** - Unified script to visualize semantic maps from BIN or PCD files.
   - `bin` subcommand: Create maps using GT semantics (.bin) from **extract_perscan_semantics.py**.
   - `pcd` subcommand: Create maps using GT PCD files that ship with the dataset.
 
-#### OSM alignment
+#### Aligning OSM data to MCD (under `mcd_annotation/`)
 This process for aligning the OSM data was done as follows:
 
 1. **visualization/view_initial_pose.py** lets a user simply see view the initial pose as a coordinate frame for one of the sequences. This will become our anchor pose. Take a screenshot for reference in the next step.
@@ -23,4 +26,3 @@ This process for aligning the OSM data was done as follows:
 5. **plot_points_onto_osm.py** can be used to visualize the points projected on OSM again and will utilize the anchor pose for other sequences in the same environment.
 
 - Note: **plot_points_onto_osm.py** and **plot_path_onto_osm.py** can both be reconciled in **view_points_on_osm_interactive.py** quite simply. Just make sure the path is translated with the points.
-
