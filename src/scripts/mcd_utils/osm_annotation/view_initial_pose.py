@@ -14,6 +14,7 @@ import pandas as pd
 import open3d as o3d
 from pathlib import Path
 from scipy.spatial.transform import Rotation as R
+from collections import namedtuple
 
 # Add project root to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
@@ -21,7 +22,6 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 # Internal imports
-from create_seq_gt_map_npy import semantic_labels as sem_kitti_labels
 from lidar2osm.core.pointcloud.pointcloud import labels2RGB_tqdm
 
 # Body to LiDAR transformation matrix
@@ -31,6 +31,82 @@ BODY_TO_LIDAR_TF = np.array([
     [-0.006634514801117132, 0.02800900135032654, -0.999585653686922, -0.01755515794222565],
     [0.0, 0.0, 0.0, 1.0]
 ])
+
+Label = namedtuple(
+    "Label",
+    [
+        "name",  # The identifier of this label, e.g. 'car', 'person', ... .
+        "id",  # An integer ID that is associated with this label.
+        "color",  # The color of this label
+    ],
+)
+
+sem_kitti_labels = [
+    # name, id, color
+    Label("unlabeled", 0, (0, 0, 0)),
+    Label("outlier", 1, (0, 0, 0)),
+    Label("car", 10, (0, 0, 142)),
+    Label("bicycle", 11, (119, 11, 32)),
+    Label("bus", 13, (250, 80, 100)),
+    Label("motorcycle", 15, (0, 0, 230)),
+    Label("on-rails", 16, (255, 0, 0)),
+    Label("truck", 18, (0, 0, 70)),
+    Label("other-vehicle", 20, (51, 0, 51)),
+    Label("person", 30, (220, 20, 60)),
+    Label("bicyclist", 31, (200, 40, 255)),
+    Label("motorcyclist", 32, (90, 30, 150)),
+    Label("road", 40, (128, 64, 128)),
+    Label("parking", 44, (250, 170, 160)),
+    Label("sidewalk", 48, (244, 35, 232)),
+    Label("other-ground", 49, (81, 0, 81)),
+    Label("building", 50, (0, 100, 0)),
+    Label("fence", 51, (190, 153, 153)),
+    Label("other-structure", 52, (0, 150, 255)),
+    Label("lane-marking", 60, (170, 255, 150)),
+    Label("vegetation", 70, (107, 142, 35)),
+    Label("trunk", 71, (0, 60, 135)),
+    Label("terrain", 72, (152, 251, 152)),
+    Label("pole", 80, (153, 153, 153)),
+    Label("traffic-sign", 81, (0, 0, 255)),
+    Label("other-object", 99, (255, 255, 50)),
+]
+
+# Create a mapping from sem_kitti label names to colors for reuse
+_sem_kitti_color_map = {label.name: label.color for label in sem_kitti_labels}
+
+# Semantic labels (converted from dictionary to namedtuple list)
+# Colors are reused from sem_kitti_labels where names match
+semantic_labels = [
+    Label("barrier", 0, (0, 0, 0)),  # Placeholder color, needs assignment
+    Label("bike", 1, _sem_kitti_color_map["bicycle"]),  # Matches sem_kitti "bicycle"
+    Label("building", 2, _sem_kitti_color_map["building"]),  # Matches sem_kitti "building"
+    Label("chair", 3, (0, 0, 0)),  # Placeholder color, needs assignment
+    Label("cliff", 4, (0, 0, 0)),  # Placeholder color, needs assignment
+    Label("container", 5, (0, 0, 0)),  # Placeholder color, needs assignment
+    Label("curb", 6, _sem_kitti_color_map["sidewalk"]),  # Placeholder color, needs assignment
+    Label("fence", 7, _sem_kitti_color_map["fence"]),  # Matches sem_kitti "fence"
+    Label("hydrant", 8, (0, 0, 0)),  # Placeholder color, needs assignment
+    Label("infosign", 9, (0, 0, 0)),  # Placeholder color, needs assignment
+    Label("lanemarking", 10, _sem_kitti_color_map["lane-marking"]),  # Matches sem_kitti "lane-marking"
+    Label("noise", 11, (255, 0, 0)),  # Placeholder color, needs assignment
+    Label("other", 12, _sem_kitti_color_map["other-object"]),  # Matches sem_kitti "other-object"
+    Label("parkinglot", 13, _sem_kitti_color_map["parking"]),  # Matches sem_kitti "parking"
+    Label("pedestrian", 14, _sem_kitti_color_map["person"]),  # Matches sem_kitti "person"
+    Label("pole", 15, _sem_kitti_color_map["pole"]),  # Matches sem_kitti "pole"
+    Label("road", 16, _sem_kitti_color_map["road"]),  # Matches sem_kitti "road"
+    Label("shelter", 17, _sem_kitti_color_map["building"]),  # Placeholder color, needs assignment
+    Label("sidewalk", 18, _sem_kitti_color_map["sidewalk"]),  # Matches sem_kitti "sidewalk"
+    Label("stairs", 19, (0, 0, 0)),  # Placeholder color, needs assignment
+    Label("structure-other", 20, _sem_kitti_color_map["other-structure"]),  # Matches sem_kitti "other-structure"
+    Label("traffic-cone", 21, (0, 0, 0)),  # Placeholder color, needs assignment
+    Label("traffic-sign", 22, _sem_kitti_color_map["traffic-sign"]),  # Matches sem_kitti "traffic-sign"
+    Label("trashbin", 23, (0, 0, 0)),  # Placeholder color, needs assignment
+    Label("treetrunk", 24, _sem_kitti_color_map["trunk"]),  # Matches sem_kitti "trunk"
+    Label("vegetation", 25, _sem_kitti_color_map["vegetation"]),  # Matches sem_kitti "vegetation"
+    Label("vehicle-dynamic", 26, _sem_kitti_color_map["car"]),  # Matches sem_kitti "car"
+    Label("vehicle-other", 27, _sem_kitti_color_map["car"]),  # Matches sem_kitti "other-vehicle"
+    Label("vehicle-static", 28, _sem_kitti_color_map["car"]),  # Matches sem_kitti "car"
+]
 
 def load_semantic_map(npy_file):
     """
