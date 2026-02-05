@@ -1,0 +1,23 @@
+# MANIFEST.in - Explicitly include all source files for sdist
+
+# Documentation
+include README.md
+include LICENSE
+
+# Python source files
+include cli.py
+include __init__.py
+include pyproject.toml
+include setup.py
+
+# C++ source files
+recursive-include composite_bki_cpp *.cpp *.hpp *.pyx *.cu
+
+# Configuration files (in parent directory)
+recursive-include ../configs *.yaml *.md
+graft ../configs
+
+# Build files
+include Makefile
+include BUILD_INSTRUCTIONS.sh
+include .gitignore

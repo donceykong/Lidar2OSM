@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=45", "wheel", "Cython>=0.29.0", "numpy>=1.19.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "composite-bki"
+version = "2.0.0"
+description = "High-performance C++-accelerated semantic segmentation for LiDAR point clouds using Bayesian Kernel Inference"
+readme = "README.md"
+requires-python = ">=3.7"
+license = {text = "MIT"}
+authors = [
+    {name = "Composite BKI Team", email = "your.email@example.com"}
+]
+keywords = ["lidar", "point-cloud", "segmentation", "bayesian", "osm", "semantic", "machine-learning"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: GIS",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.7",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: C++",
+]
+
+dependencies = [
+    "numpy>=1.19.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=6.0",
+    "black",
+    "flake8",
+]
+
+[project.urls]
+Homepage = "https://github.com/yourrepo/composite-bki"
+Documentation = "https://github.com/yourrepo/composite-bki/blob/main/README.md"
+Repository = "https://github.com/yourrepo/composite-bki"
+"Bug Tracker" = "https://github.com/yourrepo/composite-bki/issues"
+
+[project.scripts]
+composite-bki = "cli:main"
