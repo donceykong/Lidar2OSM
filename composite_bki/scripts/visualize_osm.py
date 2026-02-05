@@ -99,6 +99,15 @@ OSM_COLORS = {
     'wood': [0.2, 0.4, 0.2],           # Forest green
 }
 
+OSM_LABEL_NAMES = {
+    'buildings': 'Buildings',
+    'roads': 'Roads',
+    'grasslands': 'Grasslands',
+    'trees': 'Trees',
+    'wood': 'Wood/Forest',
+}
+
+
 # MCD Label Colors (from test_idea.py)
 MCD_LABEL_COLORS = {
     0: [0.5, 0.5, 0.5],    # barrier - gray
@@ -132,6 +141,38 @@ MCD_LABEL_COLORS = {
     28: [0.5, 0.5, 1.0],   # vehicle-static - light blue
 }
 
+MCD_LABEL_NAMES = {
+    0: 'barrier',
+    1: 'bike',
+    2: 'building',
+    3: 'chair',
+    4: 'cliff',
+    5: 'container',
+    6: 'curb',
+    7: 'fence',
+    8: 'hydrant',
+    9: 'infosign',
+    10: 'lanemarking',
+    11: 'noise',
+    12: 'other',
+    13: 'parkinglot',
+    14: 'pedestrian',
+    15: 'pole',
+    16: 'road',
+    17: 'shelter',
+    18: 'sidewalk',
+    19: 'stairs',
+    20: 'structure-other',
+    21: 'traffic-cone',
+    22: 'traffic-sign',
+    23: 'trashbin',
+    24: 'treetrunk',
+    25: 'vegetation',
+    26: 'vehicle-dynamic',
+    27: 'vehicle-other',
+    28: 'vehicle-static',
+}
+
 # SemanticKITTI Label Colors
 KITTI_LABEL_COLORS = {
     0: [0.0, 0.0, 0.0],       # unlabeled - black
@@ -161,6 +202,67 @@ KITTI_LABEL_COLORS = {
     81: [0.0, 0.8, 0.8],      # traffic-sign - cyan
     99: [0.6, 0.6, 0.6],      # other-object - gray
 }
+
+KITTI_LABEL_NAMES = {
+    0: 'unlabeled',
+    1: 'outlier',
+    10: 'car',
+    11: 'bicycle',
+    13: 'bus',
+    15: 'motorcycle',
+    16: 'on-rails',
+    18: 'truck',
+    20: 'other-vehicle',
+    30: 'person',
+    31: 'bicyclist',
+    32: 'motorcyclist',
+    40: 'road',
+    44: 'parking',
+    48: 'sidewalk',
+    49: 'other-ground',
+    50: 'building',
+    51: 'fence',
+    52: 'other-structure',
+    60: 'lane-marking',
+    70: 'vegetation',
+    71: 'trunk',
+    72: 'terrain',
+    80: 'pole',
+    81: 'traffic-sign',
+    99: 'other-object',
+}
+
+
+def print_color_legend(format_name, label_names, label_colors):
+    """
+    Print color legend to console using ANSI escape codes for colors.
+    """
+    print(f"\n=== {format_name} Color Legend ===")
+    print(f"{'ID':<12} {'Label':<20} {'Color (RGB)':<20} Sample")
+    print("-" * 65)
+    
+    # Handle string keys (OSM) and int keys (Labels)
+    sorted_ids = sorted(label_names.keys(), key=lambda x: (isinstance(x, str), x))
+    
+    for label_id in sorted_ids:
+        if label_id not in label_colors:
+            continue
+            
+        name = label_names[label_id]
+        rgb = label_colors[label_id]
+        
+        # Convert 0-1 float to 0-255 int
+        r, g, b = int(rgb[0]*255), int(rgb[1]*255), int(rgb[2]*255)
+        
+        # ANSI escape for truecolor background: \033[48;2;r;g;bm
+        # ANSI escape for reset: \033[0m
+        # Using two spaces for the color block
+        color_block = f"\033[48;2;{r};{g};{b}m    \033[0m"
+        
+        id_str = str(label_id)
+        print(f"{id_str:<12} {name:<20} [{r:>3}, {g:>3}, {b:>3}]   {color_block}")
+    print("=" * 65 + "\n")
+
 
 
 def load_point_cloud(bin_file):
@@ -408,7 +510,7 @@ def get_label_colors(labels, label_format='auto'):
             # Default color for unknown labels (magenta)
             colors[i] = [1.0, 0.0, 1.0]
     
-    return colors
+    return colors, label_format
 
 
 def visualize(scan_path, osm_path, labels_path=None, voxel_size=0.2, 
@@ -453,13 +555,19 @@ def visualize(scan_path, osm_path, labels_path=None, voxel_size=0.2,
             print(f"  Z range: [{points[:, 2].min():.2f}, {points[:, 2].max():.2f}]")
     
     # Load labels if provided
+    final_label_format = None
     if labels_path:
         print("Loading labels...")
         labels = load_labels(labels_path)
         if len(labels) != len(points):
             print(f"Warning: Label count ({len(labels)}) doesn't match point count ({len(points)})")
             labels = labels[:len(points)]  # Truncate or pad
-        colors = get_label_colors(labels, label_format)
+        colors, final_label_format = get_label_colors(labels, label_format)
+        
+        # Print legend
+        label_names = KITTI_LABEL_NAMES if final_label_format == 'kitti' else MCD_LABEL_NAMES
+        label_colors_map = KITTI_LABEL_COLORS if final_label_format == 'kitti' else MCD_LABEL_COLORS
+        print_color_legend(final_label_format.upper(), label_names, label_colors_map)
     else:
         # Use intensity for coloring
         print("No labels provided, using intensity for coloring")
@@ -568,6 +676,19 @@ def visualize(scan_path, osm_path, labels_path=None, voxel_size=0.2,
             print("✗ OSM geometries: OFF")
         return False
     
+    def show_legend(vis):
+        """Show color legend in console"""
+        if final_label_format:
+            label_names = KITTI_LABEL_NAMES if final_label_format == 'kitti' else MCD_LABEL_NAMES
+            label_colors_map = KITTI_LABEL_COLORS if final_label_format == 'kitti' else MCD_LABEL_COLORS
+            print_color_legend(final_label_format.upper(), label_names, label_colors_map)
+        else:
+            print("\nNo semantic labels loaded (intensity mode).\n")
+            
+        # Also show OSM legend
+        print_color_legend("OSM", OSM_LABEL_NAMES, OSM_COLORS)
+        return False
+    
     def show_help(vis):
         """Display help message"""
         print("\n" + "="*60)
@@ -575,6 +696,7 @@ def visualize(scan_path, osm_path, labels_path=None, voxel_size=0.2,
         print("="*60)
         print("  [P] - Toggle point cloud visibility")
         print("  [O] - Toggle OSM geometries visibility")
+        print("  [L] - Show color legend in console")
         print("  [H] - Show this help message")
         print("  [Q] - Quit visualization")
         print("\nMOUSE CONTROLS")
@@ -591,6 +713,7 @@ def visualize(scan_path, osm_path, labels_path=None, voxel_size=0.2,
     # Register keyboard callbacks
     vis.register_key_callback(ord('P'), toggle_points)  # Press 'P' for points
     vis.register_key_callback(ord('O'), toggle_osm)     # Press 'O' for OSM
+    vis.register_key_callback(ord('L'), show_legend)    # Press 'L' for Legend
     vis.register_key_callback(ord('H'), show_help)      # Press 'H' for help
     
     # Run visualizer
