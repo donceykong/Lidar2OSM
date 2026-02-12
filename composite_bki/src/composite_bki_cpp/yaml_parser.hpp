@@ -7,6 +7,7 @@
 #include <sstream>
 #include <algorithm>
 #include <stdexcept>
+#include <iostream>
 
 namespace yaml_parser {
 
@@ -68,7 +69,9 @@ public:
                         auto values_strs = split(values_str, ',');
                         std::vector<float> row;
                         for (const auto& val_str : values_strs) {
-                            row.push_back(std::stof(val_str));
+                            try {
+                                row.push_back(std::stof(val_str));
+                            } catch (...) { }
                         }
                         current_matrix.push_back(row);
                     }
