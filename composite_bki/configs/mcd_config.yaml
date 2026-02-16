@@ -34,17 +34,33 @@ labels:
   28: vehicle-static
 
 # Confusion matrix (8x6): rows=predicted classes, cols=prior classes
-# Prior classes: [roads, parking, sidewalks, vegetation, buildings, fences]
-# UPDATED: Relaxed constraints for 3D/Dynamic objects to prevent suppression
+# Prior cols: [roads, parking, sidewalks, vegetation, buildings, fences]
 confusion_matrix:
-  - [0.85, 0.10, 0.05, 0.00, 0.00, 0.00]  # roads (Strict - we trust OSM roads)
-  - [0.70, 0.70, 0.70, 0.70, 0.70, 0.70]  # parking (Relaxed - missing from OSM)
-  - [0.70, 0.70, 0.70, 0.70, 0.70, 0.70]  # sidewalks (Relaxed - missing from OSM)
-  - [0.60, 0.60, 0.60, 0.90, 0.60, 0.60]  # vegetation (Relaxed for overhangs)
-  - [0.01, 0.01, 0.02, 0.05, 0.90, 0.01]  # buildings (Strict - we trust OSM buildings)
-  - [0.70, 0.70, 0.70, 0.70, 0.70, 0.84]  # fences (Relaxed - missing from OSM)
-  - [0.80, 0.80, 0.80, 0.80, 0.80, 0.80]  # vehicles (Relaxed - dynamic)
-  - [0.80, 0.80, 0.80, 0.80, 0.80, 0.80]  # other (Relaxed - everywhere)
+  # 0: Roads (Strict trust)
+  - [0.90, 0.50, 0.10, 0.01, 0.00, 0.01]
+  
+  # 1: Parking (Allow on undefined, suppress on Buildings/Roads)
+  # Note: OSM often misses parking, but if it says 'Building', it's definitely NOT parking.
+  - [0.10, 0.80, 0.10, 0.05, 0.00, 0.05]
+  
+  # 2: Sidewalks (Allow near roads, suppress on Buildings)
+  - [0.10, 0.50, 0.80, 0.10, 0.00, 0.05]
+  
+  # 3: Vegetation (Relaxed - trees overhang everything)
+  # We allow vegetation on top of buildings (roof gardens) and roads (canopies)
+  - [0.20, 0.20, 0.20, 0.90, 0.20, 0.20]
+  
+  # 4: Buildings (Strict trust)
+  - [0.00, 0.00, 0.00, 0.05, 0.95, 0.01]
+  
+  # 5: Fences (Suppress on Roads/Buildings)
+  - [0.05, 0.10, 0.10, 0.50, 0.01, 0.90]
+  
+  # 6: Vehicles (Dynamic - Allow on Roads/Parking, Suppress on Buildings/Fences)
+  - [0.80, 0.80, 0.20, 0.05, 0.00, 0.01]
+  
+  # 7: Other (General fallback)
+  - [0.10, 0.10, 0.10, 0.10, 0.01, 0.10]
 
 # Mapping from raw label ID to confusion matrix row index
 label_to_matrix_idx:
@@ -78,7 +94,18 @@ label_to_matrix_idx:
   23: 7  # trashbin -> other
   11: 7  # noise -> other
 
+# OSM XML coordinate projection parameters
+# Required for proper lat/lon -> world frame alignment when using .osm XML files.
+# osm_origin_lat/lon: GPS reference point (corresponds to the first LiDAR pose position)
+# osm_world_offset_x/y: world-frame position of that GPS reference point
+# These values are for the KTH campus MCD dataset.
+osm_origin_lat: 59.348268650
+osm_origin_lon: 18.073204280
+osm_world_offset_x: 0.0
+osm_world_offset_y: 0.0
+
 # OSM category mapping to prior class indices
+# Point features (poles, signs, barriers) map to existing prior classes
 osm_class_map:
   roads: 0
   parking: 1
@@ -88,11 +115,18 @@ osm_class_map:
   wood: 3
   buildings: 4
   fences: 5
+  poles: 5        # Point features - map to fences prior (vertical structures)
+  traffic_signs: 5  # Point features - map to fences prior (vertical structures)
+  barriers: 5     # Point features - map to fences prior
 
-# OSM categories in binary file order
+# OSM categories (for both binary and XML loading)
+# Binary format expects this exact order; XML format uses these as keys
 osm_categories:
   - buildings
   - roads
   - grasslands
   - trees
   - wood
+  - poles
+  - traffic_signs
+  - barriers
