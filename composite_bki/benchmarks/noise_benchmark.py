@@ -196,18 +196,43 @@ def run_single_benchmark(
     noisy_labels_raw.tofile(noisy_labels_path)
     
     # Run refinement with parameters matching composite_bki.py defaults
-    refined_labels = composite_bki_cpp.run_pipeline(
-        lidar_path=str(lidar_path),
-        label_path=str(noisy_labels_path),
+    # Using PyContinuousBKI directly instead of run_pipeline
+    bki = composite_bki_cpp.PyContinuousBKI(
         osm_path=str(osm_path),
         config_path=str(config_path),
-        ground_truth_path=None,
-        output_path=None,
-        l_scale=3.0,        # Matches composite_bki.py default
-        sigma_0=1.0,        # Matches composite_bki.py default
-        prior_delta=5.0,    # Matches composite_bki.py default
-        alpha_0=0.01        # Matches composite_bki.py default
+        resolution=1.0,     # Standard resolution
+        l_scale=3.0,        # Matches previous default
+        sigma_0=1.0,        # Matches previous default
+        prior_delta=5.0,    # Matches previous default
+        height_sigma=0.3,   # Standard default
+        use_semantic_kernel=True,
+        use_spatial_kernel=True,
+        num_threads=-1,
+        alpha0=0.01,        # Matches previous default
+        seed_osm_prior=False, # Default
+        osm_prior_strength=0.0 # Default
     )
+
+    # Load points
+    points = np.fromfile(str(lidar_path), dtype=np.float32).reshape((-1, 4))[:, :3]
+    
+    # Update with noisy labels
+    # Note: noisy_labels_raw contains instance IDs in upper bits, but update expects raw labels
+    # We need to pass just the semantic part if that's what update expects?
+    # Actually PyContinuousBKI.update takes uint32 labels. 
+    # The C++ code maps raw labels to dense indices using the config.
+    # So passing the full uint32 is fine as long as the lower 16 bits match the config keys.
+    # However, usually we strip instance IDs before passing to BKI.
+    # Let's check if the C++ side handles masking. 
+    # Looking at continuous_bki.cpp: update takes raw_label and does `config_.raw_to_dense.find(raw_label)`.
+    # It does NOT mask 0xFFFF. So we MUST mask it here.
+    
+    noisy_labels_semantic = (noisy_labels_raw & 0xFFFF).astype(np.uint32)
+    bki.update(noisy_labels_semantic, points)
+    
+    # Infer refined labels
+    refined_labels = bki.infer(points)
+    refined_labels = np.array(refined_labels, dtype=np.uint32)
     
     # Calculate metrics AFTER refinement
     metrics_after = calculate_metrics(refined_labels, gt_labels)
@@ -400,21 +425,21 @@ def main():
     parser.add_argument(
         "--lidar",
         type=str,
-        default="../example_data/mcd_scan/0000000011_transformed.bin",
+        default="../example_data/mcd-data/data/0000000011.bin",
         help="Path to LiDAR point cloud (.bin)"
     )
     
     parser.add_argument(
         "--gt-labels",
         type=str,
-        default="../example_data/mcd_scan/0000000011_transformed.labels",
+        default="../example_data/mcd-data/labels_groundtruth/0000000011.bin",
         help="Path to ground truth labels"
     )
     
     parser.add_argument(
         "--osm",
         type=str,
-        default="../example_data/mcd_scan/kth_day_06_osm_geometries.bin",
+        default="../example_data/mcd-data/kth_day_06_osm_geometries.bin",
         help="Path to OSM geometries"
     )
     

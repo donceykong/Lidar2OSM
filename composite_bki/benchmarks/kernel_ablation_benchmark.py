@@ -17,6 +17,7 @@ from pathlib import Path
 from datetime import datetime
 
 # Add parent directory to path to import composite_bki_cpp
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 import composite_bki_cpp
 
 
@@ -156,20 +157,36 @@ def run_single_config(
     print(f"    Running with {config_name}...", end=" ", flush=True)
     
     # Run refinement with specified kernel configuration
-    refined_labels = composite_bki_cpp.run_pipeline(
-        lidar_path=str(lidar_path),
-        label_path=str(noisy_labels_path),
+    # Using PyContinuousBKI directly
+    bki = composite_bki_cpp.PyContinuousBKI(
         osm_path=str(osm_path),
         config_path=str(config_path),
-        ground_truth_path=None,
-        output_path=None,
-        l_scale=3.0,
+        resolution=1.0,
+        l_scale=1.0,
         sigma_0=1.0,
-        prior_delta=5.0,
-        alpha_0=0.01,
+        prior_delta=0.5,
+        height_sigma=0.3,
         use_semantic_kernel=use_semantic_kernel,
-        use_spatial_kernel=use_spatial_kernel
+        use_spatial_kernel=use_spatial_kernel,
+        num_threads=-1,
+        alpha0=1,
+        seed_osm_prior=True,
+        osm_prior_strength=0.0
     )
+
+    # Load points
+    points = np.fromfile(str(lidar_path), dtype=np.float32).reshape((-1, 4))[:, :3]
+    
+    # Load noisy labels and mask
+    noisy_raw = np.fromfile(str(noisy_labels_path), dtype=np.uint32)
+    noisy_labels_semantic = (noisy_raw & 0xFFFF).astype(np.uint32)
+    
+    # Update
+    bki.update(noisy_labels_semantic, points)
+    
+    # Infer
+    refined_labels = bki.infer(points)
+    refined_labels = np.array(refined_labels, dtype=np.uint32)
     
     # Calculate metrics AFTER refinement
     metrics_after = calculate_metrics(refined_labels, gt_labels)
@@ -359,21 +376,21 @@ def main():
     parser.add_argument(
         "--lidar",
         type=str,
-        default="../example_data/mcd_scan/0000000011_transformed.bin",
+        default="../example_data/mcd-data/data/0000000011.bin",
         help="Path to LiDAR point cloud (.bin)"
     )
     
     parser.add_argument(
         "--gt-labels",
         type=str,
-        default="../example_data/mcd_scan/0000000011_transformed.labels",
+        default="../example_data/mcd-data/labels_groundtruth/0000000011.bin",
         help="Path to ground truth labels"
     )
     
     parser.add_argument(
         "--osm",
         type=str,
-        default="../example_data/mcd_scan/kth_day_06_osm_geometries.bin",
+        default="../example_data/mcd-data/kth_day_06_osm_geometries.bin",
         help="Path to OSM geometries"
     )
     
