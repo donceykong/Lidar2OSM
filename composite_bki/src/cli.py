@@ -127,7 +127,7 @@ def main():
     # Required arguments
     parser.add_argument("--scan", type=str, required=True, help="Path to .bin lidar point cloud file")
     parser.add_argument("--label", type=str, required=True, help="Path to semantic labels")
-    parser.add_argument("--osm", type=str, required=True, help="Path to .bin OSM geometries file")
+    parser.add_argument("--osm", type=str, required=True, help="Path to OSM geometries file (.bin or .osm XML)")
     parser.add_argument("--output", type=str, required=True, help="Path to save refined labels")
     parser.add_argument("--config", type=str, required=True, help="Path to YAML configuration file")
     

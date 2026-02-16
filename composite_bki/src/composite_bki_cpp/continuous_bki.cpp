@@ -1,5 +1,6 @@
 #include "continuous_bki.hpp"
 #include "yaml_parser.hpp"
+#include "osm_xml_parser.hpp"
 #include <fstream>
 #include <limits>
 #include <cstring>
@@ -68,10 +69,6 @@ float Polygon::distance(const Point2D& p) const {
     return min_dist;
 }
 
-float Polygon::boundaryDistance(const Point2D& p) const {
-    return distance(p);
-}
-
 // --- ContinuousBKI Implementation ---
 
 ContinuousBKI::ContinuousBKI(const Config& config,
@@ -117,6 +114,19 @@ ContinuousBKI::ContinuousBKI(const Config& config,
 #endif
 
     block_shards_.resize(static_cast<size_t>(num_threads_));
+
+    // Build reverse mapping: confusion-matrix row index -> dense class indices.
+    // This lets us expand K_pred_-dimensional super-class probabilities back to
+    // the full num_total_classes-dimensional label space.
+    matrix_idx_to_dense_.resize(static_cast<size_t>(K_pred_));
+    for (const auto& kv : config_.label_to_matrix_idx) {
+        int raw_label = kv.first;
+        int matrix_idx = kv.second;
+        auto it = config_.raw_to_dense.find(raw_label);
+        if (it != config_.raw_to_dense.end() && matrix_idx >= 0 && matrix_idx < K_pred_) {
+            matrix_idx_to_dense_[static_cast<size_t>(matrix_idx)].push_back(it->second);
+        }
+    }
 }
 
 void ContinuousBKI::clear() {
@@ -212,14 +222,35 @@ void ContinuousBKI::initVoxelAlpha(Block& b, int lx, int ly, int lz, const Point
 }
 
 void ContinuousBKI::computePredPriorFromOSM(float x, float y, std::vector<float>& p_pred_out) const {
+    const int K = config_.num_total_classes;
     std::vector<float> m_i(K_prior_, 0.0f);
     getOSMPrior(x, y, m_i);
-    p_pred_out.resize(static_cast<size_t>(K_pred_), 0.0f);
+
+    // Step 1: Compute super-class probabilities (K_pred_-dimensional, e.g. 8)
+    std::vector<float> p_super(static_cast<size_t>(K_pred_), 0.0f);
     for (int i = 0; i < K_pred_; i++) {
         for (int j = 0; j < K_prior_; j++) {
-            p_pred_out[i] += config_.confusion_matrix[static_cast<size_t>(i)][static_cast<size_t>(j)] * m_i[j];
+            p_super[i] += config_.confusion_matrix[static_cast<size_t>(i)][static_cast<size_t>(j)] * m_i[j];
         }
     }
+
+    // Step 2: Expand to full class space (num_total_classes-dimensional, e.g. 29).
+    // Each super-class probability is distributed equally among its constituent
+    // dense classes via the matrix_idx_to_dense_ reverse mapping.
+    p_pred_out.assign(static_cast<size_t>(K), 0.0f);
+    for (int i = 0; i < K_pred_; i++) {
+        const auto& dense_labels = matrix_idx_to_dense_[static_cast<size_t>(i)];
+        if (!dense_labels.empty()) {
+            float share = p_super[i] / static_cast<float>(dense_labels.size());
+            for (int d : dense_labels) {
+                if (d >= 0 && d < K) {
+                    p_pred_out[static_cast<size_t>(d)] += share;
+                }
+            }
+        }
+    }
+
+    // Normalize
     float sum = std::accumulate(p_pred_out.begin(), p_pred_out.end(), 0.0f);
     if (sum > epsilon_)
         for (float& v : p_pred_out) v /= sum;
@@ -241,22 +272,41 @@ float ContinuousBKI::computeSpatialKernel(float dist_sq) const {
 
 float ContinuousBKI::computeDistanceToClass(float x, float y, int class_idx) const {
     Point2D p(x, y);
-    auto it = osm_data_.geometries.find(class_idx);
-    if (it == osm_data_.geometries.end() || it->second.empty()) return 50.0f;
-
     float min_dist = std::numeric_limits<float>::max();
-    for (const auto& poly : it->second) {
-        float dist_bbox_x = std::max(0.0f, std::max(poly.min_x - p.x, p.x - poly.max_x));
-        float dist_bbox_y = std::max(0.0f, std::max(poly.min_y - p.y, p.y - poly.max_y));
-        float dist_bbox_sq = dist_bbox_x * dist_bbox_x + dist_bbox_y * dist_bbox_y;
-        if (dist_bbox_sq > min_dist * min_dist) continue;
+    
+    // Check polygon geometries
+    auto it_geom = osm_data_.geometries.find(class_idx);
+    if (it_geom != osm_data_.geometries.end()) {
+        for (const auto& poly : it_geom->second) {
+            float dist_bbox_x = std::max(0.0f, std::max(poly.min_x - p.x, p.x - poly.max_x));
+            float dist_bbox_y = std::max(0.0f, std::max(poly.min_y - p.y, p.y - poly.max_y));
+            float dist_bbox_sq = dist_bbox_x * dist_bbox_x + dist_bbox_y * dist_bbox_y;
+            if (dist_bbox_sq > min_dist * min_dist) continue;
 
-        float dist = poly.distance(p);
-        if (dist < 1e-6f && poly.contains(p)) {
-            dist = -1.0f * poly.boundaryDistance(p);
+            float dist = poly.distance(p);
+            if (poly.contains(p)) {
+                dist = -dist;
+            }
+            min_dist = std::min(min_dist, dist);
         }
-        min_dist = std::min(min_dist, dist);
     }
+    
+    // Check point features
+    auto it_points = osm_data_.point_features.find(class_idx);
+    if (it_points != osm_data_.point_features.end()) {
+        for (const auto& pt : it_points->second) {
+            float dx = p.x - pt.x;
+            float dy = p.y - pt.y;
+            float dist = std::sqrt(dx*dx + dy*dy);
+            min_dist = std::min(min_dist, dist);
+        }
+    }
+    
+    // If no features found for this class, return large default
+    if (min_dist == std::numeric_limits<float>::max()) {
+        return 50.0f;
+    }
+    
     return min_dist;
 }
 
@@ -331,6 +381,27 @@ void ContinuousBKI::update(const std::vector<uint32_t>& labels, const std::vecto
     int num_shards = static_cast<int>(block_shards_.size());
     int radius = static_cast<int>(std::ceil(l_scale_ / resolution_));
 
+    // Pre-compute which shards each point's influence region touches.
+    // This fixes cross-block-boundary updates that were previously dropped.
+    std::vector<std::vector<size_t>> shard_points(static_cast<size_t>(num_shards));
+    for (size_t i = 0; i < n; i++) {
+        VoxelKey vk_p = pointToKey(points[i]);
+        BlockKey min_bk = voxelToBlockKey({vk_p.x - radius, vk_p.y - radius, vk_p.z - radius});
+        BlockKey max_bk = voxelToBlockKey({vk_p.x + radius, vk_p.y + radius, vk_p.z + radius});
+        std::vector<bool> added(static_cast<size_t>(num_shards), false);
+        for (int bx = min_bk.x; bx <= max_bk.x; bx++) {
+            for (int by = min_bk.y; by <= max_bk.y; by++) {
+                for (int bz = min_bk.z; bz <= max_bk.z; bz++) {
+                    int s = getShardIndex({bx, by, bz});
+                    if (!added[static_cast<size_t>(s)]) {
+                        shard_points[static_cast<size_t>(s)].push_back(i);
+                        added[static_cast<size_t>(s)] = true;
+                    }
+                }
+            }
+        }
+    }
+
 #ifdef _OPENMP
 #pragma omp parallel num_threads(num_shards)
     {
@@ -338,12 +409,12 @@ void ContinuousBKI::update(const std::vector<uint32_t>& labels, const std::vecto
 #endif
     for (int s = 0; s < num_shards; ++s) {
         auto& shard = block_shards_[static_cast<size_t>(s)];
+        const std::vector<size_t>& pts = shard_points[static_cast<size_t>(s)];
 
-        for (size_t i = 0; i < n; i++) {
+        for (size_t pt_idx = 0; pt_idx < pts.size(); pt_idx++) {
+            size_t i = pts[pt_idx];
             const Point3D& p = points[i];
             VoxelKey vk_p = pointToKey(p);
-            BlockKey bk_p = voxelToBlockKey(vk_p);
-            if (getShardIndex(bk_p) != s) continue;
 
             uint32_t raw_label = labels[i];
             auto it_dense = config_.raw_to_dense.find(raw_label);
@@ -393,7 +464,27 @@ void ContinuousBKI::update(const std::vector<std::vector<float>>& probs, const s
 
     size_t n = points.size();
     int num_shards = static_cast<int>(block_shards_.size());
-    int radius = static_cast<int>(std::ceil(l_scale_ / resolution_)) + 1;
+    int radius = static_cast<int>(std::ceil(l_scale_ / resolution_));
+
+    // Pre-compute which shards each point's influence region touches.
+    std::vector<std::vector<size_t>> shard_points(static_cast<size_t>(num_shards));
+    for (size_t i = 0; i < n; i++) {
+        VoxelKey vk_p = pointToKey(points[i]);
+        BlockKey min_bk = voxelToBlockKey({vk_p.x - radius, vk_p.y - radius, vk_p.z - radius});
+        BlockKey max_bk = voxelToBlockKey({vk_p.x + radius, vk_p.y + radius, vk_p.z + radius});
+        std::vector<bool> added(static_cast<size_t>(num_shards), false);
+        for (int bx = min_bk.x; bx <= max_bk.x; bx++) {
+            for (int by = min_bk.y; by <= max_bk.y; by++) {
+                for (int bz = min_bk.z; bz <= max_bk.z; bz++) {
+                    int s = getShardIndex({bx, by, bz});
+                    if (!added[static_cast<size_t>(s)]) {
+                        shard_points[static_cast<size_t>(s)].push_back(i);
+                        added[static_cast<size_t>(s)] = true;
+                    }
+                }
+            }
+        }
+    }
 
 #ifdef _OPENMP
 #pragma omp parallel num_threads(num_shards)
@@ -402,12 +493,12 @@ void ContinuousBKI::update(const std::vector<std::vector<float>>& probs, const s
 #endif
     for (int s = 0; s < num_shards; ++s) {
         auto& shard = block_shards_[static_cast<size_t>(s)];
+        const std::vector<size_t>& pts = shard_points[static_cast<size_t>(s)];
 
-        for (size_t i = 0; i < n; i++) {
+        for (size_t pt_idx = 0; pt_idx < pts.size(); pt_idx++) {
+            size_t i = pts[pt_idx];
             const Point3D& p = points[i];
             VoxelKey vk_p = pointToKey(p);
-            BlockKey bk_p = voxelToBlockKey(vk_p);
-            if (getShardIndex(bk_p) != s) continue;
 
             const std::vector<float>& prob = probs[i];
             float w_i = use_weights ? weights[i] : 1.0f;
@@ -675,6 +766,324 @@ OSMData loadOSMBinary(const std::string& filename,
     return data;
 }
 
+// Classify a way's tags into an OSM class index.
+// Uses explicit priority ordering (building > highway > landuse > natural > barrier > amenity)
+// instead of relying on std::map alphabetical iteration.
+static int classifyWayTags(const std::map<std::string, std::string>& tags,
+                           const std::map<std::string, int>& osm_class_map,
+                           bool& is_area) {
+    is_area = false;
+
+    // Priority 1: Buildings
+    auto it = tags.find("building");
+    if (it != tags.end()) {
+        is_area = true;
+        auto c = osm_class_map.find("buildings");
+        return (c != osm_class_map.end()) ? c->second : -1;
+    }
+
+    // Priority 2: Roads / sidewalks
+    it = tags.find("highway");
+    if (it != tags.end()) {
+        const std::string& val = it->second;
+        is_area = false;  // Roads are lines, not areas
+        if (val == "footway" || val == "path" || val == "steps" || val == "pedestrian") {
+            auto c = osm_class_map.find("sidewalks");
+            return (c != osm_class_map.end()) ? c->second : -1;
+        } else {
+            auto c = osm_class_map.find("roads");
+            return (c != osm_class_map.end()) ? c->second : -1;
+        }
+    }
+
+    // Priority 3: Landuse
+    it = tags.find("landuse");
+    if (it != tags.end()) {
+        is_area = true;
+        const std::string& val = it->second;
+        if (val == "grass" || val == "meadow" || val == "park" || val == "recreation_ground") {
+            auto c = osm_class_map.find("grasslands");
+            return (c != osm_class_map.end()) ? c->second : -1;
+        } else if (val == "forest") {
+            auto c = osm_class_map.find("trees");
+            return (c != osm_class_map.end()) ? c->second : -1;
+        }
+        return -1;
+    }
+
+    // Priority 4: Natural features
+    it = tags.find("natural");
+    if (it != tags.end()) {
+        is_area = true;
+        const std::string& val = it->second;
+        if (val == "tree" || val == "wood") {
+            auto c = osm_class_map.find("trees");
+            return (c != osm_class_map.end()) ? c->second : -1;
+        } else if (val == "grassland" || val == "scrub") {
+            auto c = osm_class_map.find("grasslands");
+            return (c != osm_class_map.end()) ? c->second : -1;
+        }
+        return -1;
+    }
+
+    // Priority 5: Barriers / fences
+    it = tags.find("barrier");
+    if (it != tags.end()) {
+        is_area = false;
+        const std::string& val = it->second;
+        if (val == "fence" || val == "wall" || val == "hedge") {
+            auto c = osm_class_map.find("fences");
+            return (c != osm_class_map.end()) ? c->second : -1;
+        }
+        return -1;
+    }
+
+    // Priority 6: Amenity (parking)
+    it = tags.find("amenity");
+    if (it != tags.end()) {
+        is_area = true;
+        if (it->second == "parking") {
+            auto c = osm_class_map.find("parking");
+            return (c != osm_class_map.end()) ? c->second : -1;
+        }
+        return -1;
+    }
+
+    return -1;
+}
+
+// Buffer an open polyline into a polygon with a given half-width.
+// Returns a rectangle around each segment.
+static Polygon bufferPolyline(const std::vector<Point2D>& coords, float half_width) {
+    Polygon poly;
+    if (coords.size() < 2) return poly;
+
+    // For each segment, compute perpendicular offset
+    std::vector<Point2D> left_side, right_side;
+    for (size_t i = 0; i < coords.size() - 1; i++) {
+        float dx = coords[i+1].x - coords[i].x;
+        float dy = coords[i+1].y - coords[i].y;
+        float len = std::sqrt(dx*dx + dy*dy);
+        if (len < 1e-6f) continue;
+        float nx = -dy / len * half_width;
+        float ny = dx / len * half_width;
+
+        if (i == 0) {
+            left_side.push_back(Point2D(coords[i].x + nx, coords[i].y + ny));
+            right_side.push_back(Point2D(coords[i].x - nx, coords[i].y - ny));
+        }
+        left_side.push_back(Point2D(coords[i+1].x + nx, coords[i+1].y + ny));
+        right_side.push_back(Point2D(coords[i+1].x - nx, coords[i+1].y - ny));
+    }
+
+    // Combine: left forward, then right reversed
+    for (const auto& p : left_side) poly.points.push_back(p);
+    for (auto it = right_side.rbegin(); it != right_side.rend(); ++it) {
+        poly.points.push_back(*it);
+    }
+
+    if (poly.points.size() >= 3) {
+        poly.computeBounds();
+    }
+    return poly;
+}
+
+OSMData loadOSMXML(const std::string& filename,
+                   const Config& config) {
+    OSMData data;
+    osm_xml_parser::OSMParser parser;
+    
+    const auto& osm_class_map = config.osm_class_map;
+
+    try {
+        parser.parse(filename);
+    } catch (const std::exception& e) {
+        throw std::runtime_error("Failed to parse OSM XML: " + std::string(e.what()));
+    }
+    
+    if (parser.nodes.empty()) {
+        std::cerr << "Warning: No nodes found in OSM file" << std::endl;
+        return data;
+    }
+    
+    // Set up coordinate projection using flat-earth (equirectangular) projection.
+    // This matches the projection used by visualize_osm_xml.py, which computes
+    // the origin from the OSM file's <bounds> centroid.  When the .osm file has
+    // been pre-aligned with that script, using the same projection here ensures
+    // the coordinates land in the correct world-frame position.
+    //
+    // Determine origin: use the <bounds> centroid when available (matching the
+    // Python alignment tool), otherwise fall back to the node centroid.
+    double origin_lat, origin_lon;
+    double offset_x = config.osm_world_offset_x;
+    double offset_y = config.osm_world_offset_y;
+
+    // Try to read <bounds> from the file.  The element can appear anywhere
+    // (Python's ElementTree may place it at the end), so scan the whole file.
+    {
+        std::ifstream bounds_scan(filename);
+        std::string bline;
+        bool found_bounds = false;
+        while (std::getline(bounds_scan, bline)) {
+            if (bline.find("<bounds") != std::string::npos) {
+                std::string minlat_s = osm_xml_parser::get_attribute(bline, "minlat");
+                std::string maxlat_s = osm_xml_parser::get_attribute(bline, "maxlat");
+                std::string minlon_s = osm_xml_parser::get_attribute(bline, "minlon");
+                std::string maxlon_s = osm_xml_parser::get_attribute(bline, "maxlon");
+                if (!minlat_s.empty() && !maxlat_s.empty() &&
+                    !minlon_s.empty() && !maxlon_s.empty()) {
+                    double minlat = std::stod(minlat_s);
+                    double maxlat = std::stod(maxlat_s);
+                    double minlon = std::stod(minlon_s);
+                    double maxlon = std::stod(maxlon_s);
+                    origin_lat = (minlat + maxlat) / 2.0;
+                    origin_lon = (minlon + maxlon) / 2.0;
+                    found_bounds = true;
+                    std::cout << "OSM XML: Using <bounds> centroid as origin ("
+                              << origin_lat << ", " << origin_lon << ")" << std::endl;
+                }
+                break;
+            }
+        }
+        if (!found_bounds) {
+            // Fall back to node centroid (same as get_center())
+            auto center = parser.get_center();
+            origin_lat = center.first;
+            origin_lon = center.second;
+            std::cout << "OSM XML: No <bounds> found, using node centroid as origin ("
+                      << origin_lat << ", " << origin_lon << ")" << std::endl;
+        }
+    }
+
+    std::cout << "OSM XML: Flat-earth projection, origin ("
+              << origin_lat << ", " << origin_lon
+              << "), world offset (" << offset_x << ", " << offset_y << ")" << std::endl;
+
+    // Convert nodes to world-frame coordinates using flat-earth projection
+    std::map<std::string, Point2D> node_coords;
+
+    for (const auto& kv : parser.nodes) {
+        auto xy = osm_xml_parser::latlon_to_meters(
+            kv.second.lat, kv.second.lon, origin_lat, origin_lon);
+        double x = xy.first + offset_x;
+        double y = xy.second + offset_y;
+        node_coords[kv.first] = Point2D(static_cast<float>(x), static_cast<float>(y));
+    }
+    
+    // Extract point features from nodes
+    for (const auto& kv : parser.nodes) {
+        const osm_xml_parser::OSMNode& node = kv.second;
+        const Point2D& pt = node_coords[kv.first];
+        
+        int class_idx = -1;
+        for (const auto& tag : node.tags) {
+            const std::string& key = tag.first;
+            const std::string& val = tag.second;
+            
+            if (key == "highway") {
+                if (val == "street_lamp" || val == "street_light") {
+                    auto it = osm_class_map.find("poles");
+                    if (it != osm_class_map.end()) class_idx = it->second;
+                } else if (val == "traffic_signals" || val == "stop") {
+                    auto it = osm_class_map.find("traffic_signs");
+                    if (it != osm_class_map.end()) class_idx = it->second;
+                }
+            } else if (key == "barrier") {
+                if (val == "bollard" || val == "gate") {
+                    auto it = osm_class_map.find("barriers");
+                    if (it != osm_class_map.end()) class_idx = it->second;
+                }
+            } else if (key == "amenity" && val == "parking") {
+                auto it = osm_class_map.find("parking");
+                if (it != osm_class_map.end()) class_idx = it->second;
+            }
+            
+            if (class_idx >= 0) {
+                data.point_features[class_idx].push_back(pt);
+                break;
+            }
+        }
+    }
+    
+    // Extract polygons/polylines from ways
+    constexpr float ROAD_HALF_WIDTH = 3.0f;     // 6m total road width
+    constexpr float SIDEWALK_HALF_WIDTH = 1.5f;  // 3m total sidewalk width
+    constexpr float FENCE_HALF_WIDTH = 0.3f;     // 0.6m fence width
+
+    int polygon_count = 0, polyline_count = 0;
+    for (const auto& way : parser.ways) {
+        if (way.node_refs.size() < 2) continue;
+        
+        std::vector<Point2D> coords;
+        for (const auto& ref : way.node_refs) {
+            auto it = node_coords.find(ref);
+            if (it != node_coords.end()) {
+                coords.push_back(it->second);
+            }
+        }
+        
+        if (coords.size() < 2) continue;
+        
+        bool is_area = false;
+        int class_idx = classifyWayTags(way.tags, osm_class_map, is_area);
+        if (class_idx < 0) continue;
+        
+        bool way_is_closed = way.is_closed();
+
+        if (is_area && way_is_closed && coords.size() >= 3) {
+            // Closed polygon (buildings, parks, etc.)
+            Polygon poly;
+            poly.points = coords;
+            poly.computeBounds();
+            data.geometries[class_idx].push_back(poly);
+            polygon_count++;
+        } else if (!is_area || !way_is_closed) {
+            // Open polyline (roads, sidewalks, fences) -> buffer into polygon
+            float hw = ROAD_HALF_WIDTH;
+
+            // Check if this is a sidewalk or fence for narrower buffering
+            auto hw_it = way.tags.find("highway");
+            if (hw_it != way.tags.end()) {
+                const std::string& v = hw_it->second;
+                if (v == "footway" || v == "path" || v == "steps" || v == "pedestrian") {
+                    hw = SIDEWALK_HALF_WIDTH;
+                }
+            }
+            auto bar_it = way.tags.find("barrier");
+            if (bar_it != way.tags.end()) {
+                hw = FENCE_HALF_WIDTH;
+            }
+
+            Polygon buffered = bufferPolyline(coords, hw);
+            if (buffered.points.size() >= 3) {
+                data.geometries[class_idx].push_back(buffered);
+                polyline_count++;
+            }
+        }
+    }
+    
+    int total_point_features = 0;
+    for (const auto& kv : data.point_features) {
+        total_point_features += static_cast<int>(kv.second.size());
+    }
+    std::cout << "Loaded OSM XML: " 
+              << polygon_count << " polygons, "
+              << polyline_count << " buffered polylines, "
+              << total_point_features << " point features" << std::endl;
+    
+    return data;
+}
+
+OSMData loadOSM(const std::string& filename,
+                const Config& config) {
+    // Auto-detect format based on file extension
+    if (filename.size() >= 4 && filename.substr(filename.size() - 4) == ".osm") {
+        return loadOSMXML(filename, config);
+    } else {
+        return loadOSMBinary(filename, config.osm_class_map, config.osm_categories);
+    }
+}
+
 Config loadConfigFromYAML(const std::string& config_path) {
     Config config;
     try {
@@ -704,6 +1113,25 @@ Config loadConfigFromYAML(const std::string& config_path) {
             config.dense_to_raw[static_cast<int>(i)] = all_classes[i];
         }
         config.num_total_classes = static_cast<int>(all_classes.size());
+
+        // Parse optional OSM origin for XML coordinate projection
+        auto scalar_it = yaml.scalars.find("osm_origin_lat");
+        if (scalar_it != yaml.scalars.end()) {
+            config.osm_origin_lat = std::stod(scalar_it->second);
+            auto lon_it = yaml.scalars.find("osm_origin_lon");
+            if (lon_it != yaml.scalars.end()) {
+                config.osm_origin_lon = std::stod(lon_it->second);
+                config.has_osm_origin = true;
+            }
+        }
+        auto offset_x_it = yaml.scalars.find("osm_world_offset_x");
+        if (offset_x_it != yaml.scalars.end()) {
+            config.osm_world_offset_x = std::stod(offset_x_it->second);
+        }
+        auto offset_y_it = yaml.scalars.find("osm_world_offset_y");
+        if (offset_y_it != yaml.scalars.end()) {
+            config.osm_world_offset_y = std::stod(offset_y_it->second);
+        }
 
     } catch (const std::exception& e) {
         std::cerr << "Error loading config from " << config_path << ": " << e.what() << std::endl;

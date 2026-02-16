@@ -69,12 +69,12 @@ struct Polygon {
     float min_x, max_x, min_y, max_y;
     bool contains(const Point2D& p) const;
     float distance(const Point2D& p) const;
-    float boundaryDistance(const Point2D& p) const;
     void computeBounds();
 };
 
 struct OSMData {
     std::map<int, std::vector<Polygon>> geometries; // class_idx -> polygons
+    std::map<int, std::vector<Point2D>> point_features; // class_idx -> point locations
 };
 
 struct Config {
@@ -87,6 +87,13 @@ struct Config {
     std::map<int, int> raw_to_dense;
     std::map<int, int> dense_to_raw;
     int num_total_classes = 0; // assumed to match K_pred for best results
+
+    // OSM XML projection parameters (for aligning lat/lon to lidar world frame)
+    bool has_osm_origin = false;
+    double osm_origin_lat = 0.0;   // GPS reference latitude
+    double osm_origin_lon = 0.0;   // GPS reference longitude
+    double osm_world_offset_x = 0.0;  // World-frame X of the GPS reference
+    double osm_world_offset_y = 0.0;  // World-frame Y of the GPS reference
 };
 
 // --- Block storage ---
@@ -201,12 +208,21 @@ private:
     // Derived
     int K_pred_;
     int K_prior_;
+
+    // Reverse mapping: confusion-matrix row index -> list of dense class indices
+    // Built from label_to_matrix_idx + raw_to_dense so that super-class
+    // probabilities can be expanded back to the full num_total_classes space.
+    std::vector<std::vector<int>> matrix_idx_to_dense_;
 };
 
 // Loaders
 OSMData loadOSMBinary(const std::string& filename,
                       const std::map<std::string, int>& osm_class_map,
                       const std::vector<std::string>& osm_categories);
+OSMData loadOSMXML(const std::string& filename,
+                   const Config& config);
+OSMData loadOSM(const std::string& filename,
+                const Config& config);
 Config loadConfigFromYAML(const std::string& config_path);
 
 } // namespace continuous_bki

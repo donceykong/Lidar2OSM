@@ -48,6 +48,8 @@ cdef extern from "continuous_bki.hpp" namespace "continuous_bki":
     OSMData loadOSMBinary(const string& filename,
                           const map[string, int]& osm_class_map,
                           const vector[string]& osm_categories) except +
+    OSMData loadOSM(const string& filename,
+                    const Config& config) except +
 
 # Python Wrapper
 cdef class PyContinuousBKI:
@@ -74,9 +76,8 @@ cdef class PyContinuousBKI:
             
         self.config = loadConfigFromYAML(config_path.encode('utf-8'))
         
-        self.osm_data = loadOSMBinary(osm_path.encode('utf-8'),
-                                      self.config.osm_class_map,
-                                      self.config.osm_categories)
+        self.osm_data = loadOSM(osm_path.encode('utf-8'),
+                                self.config)
                                       
         self.bki_ptr = new ContinuousBKI(self.config, self.osm_data,
                                          resolution, l_scale, sigma_0, prior_delta, height_sigma,
