@@ -576,7 +576,104 @@ def visualize(scan_path, osm_path, labels_path=None, voxel_size=0.2,
     
     # Load OSM data
     print("Loading OSM geometries...")
-    osm_data = load_osm_bin(osm_path)
+    
+    osm_data = {}
+    
+    if osm_path.endswith('.bin'):
+        osm_data = load_osm_bin(osm_path)
+    elif osm_path.endswith('.osm'):
+        # Parse XML manually to match visualize_osm_xml.py logic but return format compatible with this script
+        import xml.etree.ElementTree as ET
+        import math
+        
+        print(f"Parsing XML: {osm_path}")
+        tree = ET.parse(osm_path)
+        root = tree.getroot()
+        
+        # 1. Parse Bounds / Origin
+        origin_lat = 0
+        origin_lon = 0
+        bounds = root.find('bounds')
+        if bounds is not None:
+            minlat = float(bounds.get('minlat'))
+            minlon = float(bounds.get('minlon'))
+            maxlat = float(bounds.get('maxlat'))
+            maxlon = float(bounds.get('maxlon'))
+            origin_lat = (minlat + maxlat) / 2.0
+            origin_lon = (minlon + maxlon) / 2.0
+        else:
+            first_node = root.find('node')
+            if first_node is not None:
+                origin_lat = float(first_node.get('lat'))
+                origin_lon = float(first_node.get('lon'))
+        
+        print(f"Origin set to: {origin_lat:.6f}, {origin_lon:.6f}")
+        
+        def latlon_to_meters(lat, lon):
+            R = 6378137.0 
+            x = math.radians(lon - origin_lon) * math.cos(math.radians(origin_lat)) * R
+            y = math.radians(lat - origin_lat) * R
+            return x, y
+
+        # 2. Parse Nodes
+        nodes = {}
+        for node in root.findall('node'):
+            nid = node.get('id')
+            lat = float(node.get('lat'))
+            lon = float(node.get('lon'))
+            nodes[nid] = latlon_to_meters(lat, lon)
+
+        # 3. Parse Ways and categorize
+        # Mapping from XML tags to our categories ('buildings', 'roads', 'grasslands', 'trees', 'wood')
+        # Note: The binary format has specific categories. We map XML tags to these.
+        # If a tag doesn't fit, we might need to add categories or map to 'roads' (default line) or 'buildings' (default poly)
+        
+        # Initialize categories
+        osm_data = {
+            'buildings': [],
+            'roads': [],
+            'grasslands': [],
+            'trees': [],
+            'wood': []
+        }
+        
+        for way in root.findall('way'):
+            node_ids = [nd.get('ref') for nd in way.findall('nd')]
+            tags = {tag.get('k'): tag.get('v') for tag in way.findall('tag')}
+            
+            coords = [nodes[nid] for nid in node_ids if nid in nodes]
+            if len(coords) < 2: continue
+            
+            # Categorize
+            cat = None
+            if 'building' in tags:
+                cat = 'buildings'
+            elif 'highway' in tags:
+                cat = 'roads'
+            elif 'landuse' in tags:
+                if tags['landuse'] in ['grass', 'meadow', 'greenfield']:
+                    cat = 'grasslands'
+                elif tags['landuse'] in ['forest']:
+                    cat = 'wood'
+            elif 'natural' in tags:
+                if tags['natural'] in ['tree', 'tree_row']:
+                    cat = 'trees'
+                elif tags['natural'] in ['wood', 'scrub']:
+                    cat = 'wood'
+                elif tags['natural'] == 'grassland':
+                    cat = 'grasslands'
+            
+            # Fallback or skip
+            if cat:
+                osm_data[cat].append(coords)
+            # else:
+            #    # Optional: map unknown things to 'roads' (lines) or 'buildings' (polys) for viz?
+            #    pass
+
+    else:
+        print(f"Error: Unknown OSM file extension: {osm_path}")
+        return
+
     total_osm = sum(len(items) for items in osm_data.values())
     print(f"Loaded {total_osm} OSM geometries")
     
