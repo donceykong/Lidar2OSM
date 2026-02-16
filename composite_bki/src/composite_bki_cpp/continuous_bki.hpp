@@ -165,21 +165,50 @@ private:
     // shard selection by BlockKey
     int getShardIndex(const BlockKey& bk) const;
 
-    // block allocator/accessor
-    Block& getOrCreateBlock(std::unordered_map<BlockKey, Block, BlockKeyHasher>& shard_map, const BlockKey& bk) const;
+    // block allocator/accessor (buffer versions avoid heap allocs during seeding)
+    Block& getOrCreateBlock(std::unordered_map<BlockKey, Block, BlockKeyHasher>& shard_map,
+                            const BlockKey& bk,
+                            std::vector<float>& buf_m_i,
+                            std::vector<float>& buf_p_super,
+                            std::vector<float>& buf_p_pred) const;
     const Block* getBlockConst(const std::unordered_map<BlockKey, Block, BlockKeyHasher>& shard_map, const BlockKey& bk) const;
 
     // Prior seeding (Dirichlet base + optional OSM mapped prior)
-    void initVoxelAlpha(Block& b, int lx, int ly, int lz, const Point3D& center) const;
+    void initVoxelAlpha(Block& b, int lx, int ly, int lz, const Point3D& center,
+                        std::vector<float>& buf_m_i,
+                        std::vector<float>& buf_p_super,
+                        std::vector<float>& buf_p_pred) const;
 
     // OSM->pred probability mapping: p_pred = normalize(M @ m_i)
-    void computePredPriorFromOSM(float x, float y, std::vector<float>& p_pred_out) const;
+    void computePredPriorFromOSM(float x, float y,
+                                 std::vector<float>& p_pred_out,
+                                 std::vector<float>& buf_m_i,
+                                 std::vector<float>& buf_p_super) const;
 
     // --- OSM / kernels ---
     float computeDistanceToClass(float x, float y, int class_idx) const;
     void getOSMPrior(float x, float y, std::vector<float>& m_i) const;
-    float getSemanticKernel(int matrix_idx, const std::vector<float>& m_i) const;
+    float getSemanticKernel(int matrix_idx, const std::vector<float>& m_i,
+                            std::vector<float>& buf_expected_obs) const;
     float computeSpatialKernel(float dist_sq) const;
+
+    // --- Precomputed OSM prior raster ---
+    struct OSMPriorRaster {
+        std::vector<float> data;   // [height * width * K_prior] row-major
+        int width = 0, height = 0;
+        int K_prior = 0;
+        float min_x = 0, min_y = 0;
+        float cell_size = 1.0f;
+
+        void build(const ContinuousBKI& bki, float res);
+        void lookup(float x, float y, std::vector<float>& m_i) const;
+    };
+
+    // --- Flat lookup tables for O(1) label mapping ---
+    std::vector<int> raw_to_dense_flat_;   // raw_label -> dense, -1 if unmapped
+    std::vector<int> dense_to_raw_flat_;   // dense -> raw_label, -1 if unmapped
+    std::vector<int> label_to_matrix_flat_; // raw_label -> matrix_idx, -1 if unmapped
+    int max_raw_label_ = 0;
 
 private:
     Config config_;
@@ -209,9 +238,10 @@ private:
     int K_pred_;
     int K_prior_;
 
+    // Precomputed structures
+    OSMPriorRaster osm_prior_raster_;
+
     // Reverse mapping: confusion-matrix row index -> list of dense class indices
-    // Built from label_to_matrix_idx + raw_to_dense so that super-class
-    // probabilities can be expanded back to the full num_total_classes space.
     std::vector<std::vector<int>> matrix_idx_to_dense_;
 };
 

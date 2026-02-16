@@ -69,7 +69,161 @@ float Polygon::distance(const Point2D& p) const {
     return min_dist;
 }
 
-// --- ContinuousBKI Implementation ---
+// =====================================================================
+// OSM Prior Raster: precompute 2D prior field for O(1) bilinear lookup
+// =====================================================================
+
+// Brute-force distance to class (all features, no spatial index).
+// Used only during one-time raster construction.
+static float computeDistanceToClassBruteForce(const OSMData& osm_data,
+                                               float x, float y, int class_idx) {
+    Point2D p(x, y);
+    float min_dist = std::numeric_limits<float>::max();
+
+    auto it_geom = osm_data.geometries.find(class_idx);
+    if (it_geom != osm_data.geometries.end()) {
+        for (const auto& poly : it_geom->second) {
+            float dist_bbox_x = std::max(0.0f, std::max(poly.min_x - p.x, p.x - poly.max_x));
+            float dist_bbox_y = std::max(0.0f, std::max(poly.min_y - p.y, p.y - poly.max_y));
+            float dist_bbox_sq = dist_bbox_x * dist_bbox_x + dist_bbox_y * dist_bbox_y;
+            if (dist_bbox_sq > min_dist * min_dist) continue;
+
+            float dist = poly.distance(p);
+            if (poly.contains(p)) dist = -dist;
+            min_dist = std::min(min_dist, dist);
+        }
+    }
+
+    auto it_points = osm_data.point_features.find(class_idx);
+    if (it_points != osm_data.point_features.end()) {
+        for (const auto& pt : it_points->second) {
+            float dx = p.x - pt.x;
+            float dy = p.y - pt.y;
+            float dist = std::sqrt(dx*dx + dy*dy);
+            min_dist = std::min(min_dist, dist);
+        }
+    }
+
+    if (min_dist == std::numeric_limits<float>::max()) return 50.0f;
+    return min_dist;
+}
+
+void ContinuousBKI::OSMPriorRaster::build(const ContinuousBKI& bki, float res) {
+    K_prior = bki.K_prior_;
+    if (K_prior <= 0) {
+        width = height = 0;
+        return;
+    }
+
+    // Compute bounding box from all OSM features
+    float bb_min_x = std::numeric_limits<float>::max();
+    float bb_max_x = -std::numeric_limits<float>::max();
+    float bb_min_y = std::numeric_limits<float>::max();
+    float bb_max_y = -std::numeric_limits<float>::max();
+    bool has_data = false;
+
+    for (const auto& kv : bki.osm_data_.geometries) {
+        for (const auto& poly : kv.second) {
+            bb_min_x = std::min(bb_min_x, poly.min_x);
+            bb_max_x = std::max(bb_max_x, poly.max_x);
+            bb_min_y = std::min(bb_min_y, poly.min_y);
+            bb_max_y = std::max(bb_max_y, poly.max_y);
+            has_data = true;
+        }
+    }
+    for (const auto& kv : bki.osm_data_.point_features) {
+        for (const auto& pt : kv.second) {
+            bb_min_x = std::min(bb_min_x, pt.x);
+            bb_max_x = std::max(bb_max_x, pt.x);
+            bb_min_y = std::min(bb_min_y, pt.y);
+            bb_max_y = std::max(bb_max_y, pt.y);
+            has_data = true;
+        }
+    }
+
+    if (!has_data) {
+        width = height = 0;
+        return;
+    }
+
+    // Pad by sigmoid effective range so edge queries still get meaningful priors
+    float pad = bki.delta_ * 6.0f;
+    bb_min_x -= pad; bb_max_x += pad;
+    bb_min_y -= pad; bb_max_y += pad;
+
+    min_x = bb_min_x;
+    min_y = bb_min_y;
+    cell_size = res;
+
+    float extent_x = bb_max_x - bb_min_x;
+    float extent_y = bb_max_y - bb_min_y;
+    width  = static_cast<int>(std::ceil(extent_x / cell_size)) + 1;
+    height = static_cast<int>(std::ceil(extent_y / cell_size)) + 1;
+
+    data.resize(static_cast<size_t>(width) * static_cast<size_t>(height) * static_cast<size_t>(K_prior));
+
+    for (int iy = 0; iy < height; iy++) {
+        float y = min_y + (iy + 0.5f) * cell_size;
+        for (int ix = 0; ix < width; ix++) {
+            float x = min_x + (ix + 0.5f) * cell_size;
+            size_t base = (static_cast<size_t>(iy) * static_cast<size_t>(width)
+                         + static_cast<size_t>(ix)) * static_cast<size_t>(K_prior);
+
+            float sum = 0.0f;
+            for (int k = 0; k < K_prior; k++) {
+                float dist = computeDistanceToClassBruteForce(bki.osm_data_, x, y, k);
+                float score = 1.0f / (1.0f + std::exp((dist / bki.delta_) - 4.6f));
+                data[base + static_cast<size_t>(k)] = score;
+                sum += score;
+            }
+            if (sum > bki.epsilon_) {
+                for (int k = 0; k < K_prior; k++) {
+                    data[base + static_cast<size_t>(k)] /= sum;
+                }
+            }
+        }
+    }
+
+    std::cout << "OSM prior raster: " << width << "x" << height
+              << " (" << (width * height) << " cells at " << cell_size << "m resolution)" << std::endl;
+}
+
+void ContinuousBKI::OSMPriorRaster::lookup(float x, float y, std::vector<float>& m_i) const {
+    if (width <= 0 || height <= 0) return;
+
+    float fx = (x - min_x) / cell_size - 0.5f;
+    float fy = (y - min_y) / cell_size - 0.5f;
+
+    int ix0_unclamped = static_cast<int>(std::floor(fx));
+    int iy0_unclamped = static_cast<int>(std::floor(fy));
+    float tx = fx - static_cast<float>(ix0_unclamped);
+    float ty = fy - static_cast<float>(iy0_unclamped);
+
+    int ix0 = std::max(0, std::min(ix0_unclamped, width - 1));
+    int iy0 = std::max(0, std::min(iy0_unclamped, height - 1));
+    int ix1 = std::max(0, std::min(ix0_unclamped + 1, width - 1));
+    int iy1 = std::max(0, std::min(iy0_unclamped + 1, height - 1));
+
+    size_t base00 = (static_cast<size_t>(iy0) * static_cast<size_t>(width) + static_cast<size_t>(ix0)) * static_cast<size_t>(K_prior);
+    size_t base10 = (static_cast<size_t>(iy0) * static_cast<size_t>(width) + static_cast<size_t>(ix1)) * static_cast<size_t>(K_prior);
+    size_t base01 = (static_cast<size_t>(iy1) * static_cast<size_t>(width) + static_cast<size_t>(ix0)) * static_cast<size_t>(K_prior);
+    size_t base11 = (static_cast<size_t>(iy1) * static_cast<size_t>(width) + static_cast<size_t>(ix1)) * static_cast<size_t>(K_prior);
+
+    float w00 = (1.0f - tx) * (1.0f - ty);
+    float w10 = tx * (1.0f - ty);
+    float w01 = (1.0f - tx) * ty;
+    float w11 = tx * ty;
+
+    for (int k = 0; k < K_prior; k++) {
+        size_t sk = static_cast<size_t>(k);
+        m_i[sk] = w00 * data[base00 + sk] + w10 * data[base10 + sk]
+                + w01 * data[base01 + sk] + w11 * data[base11 + sk];
+    }
+}
+
+// =====================================================================
+// ContinuousBKI Implementation
+// =====================================================================
 
 ContinuousBKI::ContinuousBKI(const Config& config,
               const OSMData& osm_data,
@@ -116,8 +270,6 @@ ContinuousBKI::ContinuousBKI(const Config& config,
     block_shards_.resize(static_cast<size_t>(num_threads_));
 
     // Build reverse mapping: confusion-matrix row index -> dense class indices.
-    // This lets us expand K_pred_-dimensional super-class probabilities back to
-    // the full num_total_classes-dimensional label space.
     matrix_idx_to_dense_.resize(static_cast<size_t>(K_pred_));
     for (const auto& kv : config_.label_to_matrix_idx) {
         int raw_label = kv.first;
@@ -127,6 +279,36 @@ ContinuousBKI::ContinuousBKI(const Config& config,
             matrix_idx_to_dense_[static_cast<size_t>(matrix_idx)].push_back(it->second);
         }
     }
+
+    // Build flat lookup tables for O(1) label mapping
+    max_raw_label_ = 0;
+    for (const auto& kv : config_.raw_to_dense) {
+        if (kv.first > max_raw_label_) max_raw_label_ = kv.first;
+    }
+    for (const auto& kv : config_.label_to_matrix_idx) {
+        if (kv.first > max_raw_label_) max_raw_label_ = static_cast<int>(kv.first);
+    }
+
+    raw_to_dense_flat_.assign(static_cast<size_t>(max_raw_label_ + 1), -1);
+    for (const auto& kv : config_.raw_to_dense) {
+        raw_to_dense_flat_[static_cast<size_t>(kv.first)] = kv.second;
+    }
+
+    int max_dense = config_.num_total_classes;
+    dense_to_raw_flat_.assign(static_cast<size_t>(max_dense), -1);
+    for (const auto& kv : config_.dense_to_raw) {
+        if (kv.first >= 0 && kv.first < max_dense) {
+            dense_to_raw_flat_[static_cast<size_t>(kv.first)] = kv.second;
+        }
+    }
+
+    label_to_matrix_flat_.assign(static_cast<size_t>(max_raw_label_ + 1), -1);
+    for (const auto& kv : config_.label_to_matrix_idx) {
+        label_to_matrix_flat_[static_cast<size_t>(kv.first)] = kv.second;
+    }
+
+    // Build precomputed OSM prior raster (one-time cost)
+    osm_prior_raster_.build(*this, resolution_);
 }
 
 void ContinuousBKI::clear() {
@@ -170,7 +352,13 @@ void ContinuousBKI::voxelToLocal(const VoxelKey& vk, int& lx, int& ly, int& lz) 
     lz = mod_floor(vk.z, BLOCK_SIZE);
 }
 
-Block& ContinuousBKI::getOrCreateBlock(std::unordered_map<BlockKey, Block, BlockKeyHasher>& shard_map, const BlockKey& bk) const {
+// getOrCreateBlock with pre-allocated buffers to avoid heap allocs during OSM seeding
+Block& ContinuousBKI::getOrCreateBlock(
+        std::unordered_map<BlockKey, Block, BlockKeyHasher>& shard_map,
+        const BlockKey& bk,
+        std::vector<float>& buf_m_i,
+        std::vector<float>& buf_p_super,
+        std::vector<float>& buf_p_pred) const {
     auto it = shard_map.find(bk);
     if (it != shard_map.end())
         return it->second;
@@ -187,7 +375,7 @@ Block& ContinuousBKI::getOrCreateBlock(std::unordered_map<BlockKey, Block, Block
                     int vy = bk.y * BLOCK_SIZE + ly;
                     int vz = bk.z * BLOCK_SIZE + lz;
                     Point3D center((vx + 0.5f) * resolution_, (vy + 0.5f) * resolution_, (vz + 0.5f) * resolution_);
-                    initVoxelAlpha(blk, lx, ly, lz, center);
+                    initVoxelAlpha(blk, lx, ly, lz, center, buf_m_i, buf_p_super, buf_p_pred);
                 }
             }
         }
@@ -203,45 +391,61 @@ const Block* ContinuousBKI::getBlockConst(const std::unordered_map<BlockKey, Blo
     return &it->second;
 }
 
-void ContinuousBKI::initVoxelAlpha(Block& b, int lx, int ly, int lz, const Point3D& center) const {
+// initVoxelAlpha with pre-allocated buffers
+void ContinuousBKI::initVoxelAlpha(Block& b, int lx, int ly, int lz, const Point3D& center,
+                                    std::vector<float>& buf_m_i,
+                                    std::vector<float>& buf_p_super,
+                                    std::vector<float>& buf_p_pred) const {
     const int K = config_.num_total_classes;
     for (int c = 0; c < K; c++) {
         int idx = flatIndex(lx, ly, lz, c);
         b.alpha[idx] = alpha0_;
     }
     if (seed_osm_prior_ && osm_prior_strength_ > 0.0f && K_pred_ > 0 && K_prior_ > 0) {
-        std::vector<float> p_pred;
-        computePredPriorFromOSM(center.x, center.y, p_pred);
-        if (p_pred.size() == static_cast<size_t>(K)) {
+        computePredPriorFromOSM(center.x, center.y, buf_p_pred, buf_m_i, buf_p_super);
+        if (buf_p_pred.size() == static_cast<size_t>(K)) {
             for (int c = 0; c < K; c++) {
                 int idx = flatIndex(lx, ly, lz, c);
-                b.alpha[idx] += osm_prior_strength_ * p_pred[c];
+                b.alpha[idx] += osm_prior_strength_ * buf_p_pred[c];
             }
         }
     }
 }
 
-void ContinuousBKI::computePredPriorFromOSM(float x, float y, std::vector<float>& p_pred_out) const {
+// computePredPriorFromOSM with pre-allocated buffers (no heap allocs)
+void ContinuousBKI::computePredPriorFromOSM(float x, float y,
+                                              std::vector<float>& p_pred_out,
+                                              std::vector<float>& buf_m_i,
+                                              std::vector<float>& buf_p_super) const {
     const int K = config_.num_total_classes;
-    std::vector<float> m_i(K_prior_, 0.0f);
-    getOSMPrior(x, y, m_i);
 
-    // Step 1: Compute super-class probabilities (K_pred_-dimensional, e.g. 8)
-    std::vector<float> p_super(static_cast<size_t>(K_pred_), 0.0f);
+    // Reuse buf_m_i
+    if (buf_m_i.size() != static_cast<size_t>(K_prior_))
+        buf_m_i.resize(static_cast<size_t>(K_prior_));
+    getOSMPrior(x, y, buf_m_i);
+
+    // Reuse buf_p_super
+    if (buf_p_super.size() != static_cast<size_t>(K_pred_))
+        buf_p_super.resize(static_cast<size_t>(K_pred_));
+    std::fill(buf_p_super.begin(), buf_p_super.end(), 0.0f);
+
     for (int i = 0; i < K_pred_; i++) {
+        float acc = 0.0f;
         for (int j = 0; j < K_prior_; j++) {
-            p_super[i] += config_.confusion_matrix[static_cast<size_t>(i)][static_cast<size_t>(j)] * m_i[j];
+            acc += config_.confusion_matrix[static_cast<size_t>(i)][static_cast<size_t>(j)] * buf_m_i[j];
         }
+        buf_p_super[i] = acc;
     }
 
-    // Step 2: Expand to full class space (num_total_classes-dimensional, e.g. 29).
-    // Each super-class probability is distributed equally among its constituent
-    // dense classes via the matrix_idx_to_dense_ reverse mapping.
-    p_pred_out.assign(static_cast<size_t>(K), 0.0f);
+    // Expand to full class space
+    if (p_pred_out.size() != static_cast<size_t>(K))
+        p_pred_out.resize(static_cast<size_t>(K));
+    std::fill(p_pred_out.begin(), p_pred_out.end(), 0.0f);
+
     for (int i = 0; i < K_pred_; i++) {
         const auto& dense_labels = matrix_idx_to_dense_[static_cast<size_t>(i)];
         if (!dense_labels.empty()) {
-            float share = p_super[i] / static_cast<float>(dense_labels.size());
+            float share = buf_p_super[i] / static_cast<float>(dense_labels.size());
             for (int d : dense_labels) {
                 if (d >= 0 && d < K) {
                     p_pred_out[static_cast<size_t>(d)] += share;
@@ -250,10 +454,10 @@ void ContinuousBKI::computePredPriorFromOSM(float x, float y, std::vector<float>
         }
     }
 
-    // Normalize
-    float sum = std::accumulate(p_pred_out.begin(), p_pred_out.end(), 0.0f);
+    float sum = 0.0f;
+    for (int c = 0; c < K; c++) sum += p_pred_out[c];
     if (sum > epsilon_)
-        for (float& v : p_pred_out) v /= sum;
+        for (int c = 0; c < K; c++) p_pred_out[c] /= sum;
 }
 
 float ContinuousBKI::computeSpatialKernel(float dist_sq) const {
@@ -271,76 +475,59 @@ float ContinuousBKI::computeSpatialKernel(float dist_sq) const {
 }
 
 float ContinuousBKI::computeDistanceToClass(float x, float y, int class_idx) const {
-    Point2D p(x, y);
-    float min_dist = std::numeric_limits<float>::max();
-    
-    // Check polygon geometries
-    auto it_geom = osm_data_.geometries.find(class_idx);
-    if (it_geom != osm_data_.geometries.end()) {
-        for (const auto& poly : it_geom->second) {
-            float dist_bbox_x = std::max(0.0f, std::max(poly.min_x - p.x, p.x - poly.max_x));
-            float dist_bbox_y = std::max(0.0f, std::max(poly.min_y - p.y, p.y - poly.max_y));
-            float dist_bbox_sq = dist_bbox_x * dist_bbox_x + dist_bbox_y * dist_bbox_y;
-            if (dist_bbox_sq > min_dist * min_dist) continue;
-
-            float dist = poly.distance(p);
-            if (poly.contains(p)) {
-                dist = -dist;
-            }
-            min_dist = std::min(min_dist, dist);
-        }
-    }
-    
-    // Check point features
-    auto it_points = osm_data_.point_features.find(class_idx);
-    if (it_points != osm_data_.point_features.end()) {
-        for (const auto& pt : it_points->second) {
-            float dx = p.x - pt.x;
-            float dy = p.y - pt.y;
-            float dist = std::sqrt(dx*dx + dy*dy);
-            min_dist = std::min(min_dist, dist);
-        }
-    }
-    
-    // If no features found for this class, return large default
-    if (min_dist == std::numeric_limits<float>::max()) {
-        return 50.0f;
-    }
-    
-    return min_dist;
+    return computeDistanceToClassBruteForce(osm_data_, x, y, class_idx);
 }
 
+// getOSMPrior: uses precomputed raster when available, falls back to brute force
 void ContinuousBKI::getOSMPrior(float x, float y, std::vector<float>& m_i) const {
     if (m_i.size() != static_cast<size_t>(K_prior_)) m_i.resize(static_cast<size_t>(K_prior_));
 
-    std::vector<float> s_scores(static_cast<size_t>(K_prior_), 0.0f);
+    if (osm_prior_raster_.width > 0) {
+        osm_prior_raster_.lookup(x, y, m_i);
+        return;
+    }
+
+    // Fallback: compute on the fly (no raster built)
+    float sum = 0.0f;
     for (int k = 0; k < K_prior_; k++) {
         float dist = computeDistanceToClass(x, y, k);
-        s_scores[static_cast<size_t>(k)] = 1.0f / (1.0f + std::exp((dist / delta_) - 4.6f));
+        float score = 1.0f / (1.0f + std::exp((dist / delta_) - 4.6f));
+        m_i[static_cast<size_t>(k)] = score;
+        sum += score;
     }
-    float sum = std::accumulate(s_scores.begin(), s_scores.end(), 0.0f);
-    for (int k = 0; k < K_prior_; k++) {
-        m_i[static_cast<size_t>(k)] = s_scores[static_cast<size_t>(k)] / (sum + epsilon_);
+    if (sum > epsilon_) {
+        for (int k = 0; k < K_prior_; k++) m_i[k] /= sum;
     }
 }
 
-float ContinuousBKI::getSemanticKernel(int matrix_idx, const std::vector<float>& m_i) const {
+// getSemanticKernel with pre-allocated buffer for expected_obs
+float ContinuousBKI::getSemanticKernel(int matrix_idx, const std::vector<float>& m_i,
+                                        std::vector<float>& buf_expected_obs) const {
     if (!use_semantic_kernel_) return 1.0f;
     if (matrix_idx < 0 || matrix_idx >= K_pred_) return 1.0f;
 
     float c_xi = *std::max_element(m_i.begin(), m_i.end());
-    std::vector<float> expected_obs(static_cast<size_t>(K_pred_), 0.0f);
+
+    if (buf_expected_obs.size() != static_cast<size_t>(K_pred_))
+        buf_expected_obs.resize(static_cast<size_t>(K_pred_));
+    std::fill(buf_expected_obs.begin(), buf_expected_obs.end(), 0.0f);
+
     for (int i = 0; i < K_pred_; i++) {
+        float acc = 0.0f;
         for (int j = 0; j < K_prior_; j++) {
-            expected_obs[static_cast<size_t>(i)] += config_.confusion_matrix[static_cast<size_t>(i)][static_cast<size_t>(j)] * m_i[static_cast<size_t>(j)];
+            acc += config_.confusion_matrix[static_cast<size_t>(i)][static_cast<size_t>(j)] * m_i[static_cast<size_t>(j)];
         }
+        buf_expected_obs[i] = acc;
     }
-    float numerator = expected_obs[static_cast<size_t>(matrix_idx)];
-    float denominator = *std::max_element(expected_obs.begin(), expected_obs.end()) + epsilon_;
+    float numerator = buf_expected_obs[static_cast<size_t>(matrix_idx)];
+    float denominator = *std::max_element(buf_expected_obs.begin(), buf_expected_obs.end()) + epsilon_;
     float s_i = numerator / denominator;
     return (1.0f - c_xi) + (c_xi * s_i);
 }
 
+// =====================================================================
+// update (labels overload)
+// =====================================================================
 void ContinuousBKI::update(const std::vector<uint32_t>& labels, const std::vector<Point3D>& points) {
     if (labels.size() != points.size()) {
         std::cerr << "Mismatch in points and labels size" << std::endl;
@@ -354,25 +541,30 @@ void ContinuousBKI::update(const std::vector<uint32_t>& labels, const std::vecto
 #ifdef _OPENMP
 #pragma omp parallel
         {
-            std::vector<float> temp_m_i(static_cast<size_t>(K_prior_));
+            // Thread-local buffers: no heap allocs inside the loop
+            std::vector<float> tl_m_i(static_cast<size_t>(K_prior_));
+            std::vector<float> tl_expected_obs(static_cast<size_t>(K_pred_));
 #pragma omp for schedule(static)
             for (size_t i = 0; i < n; i++) {
-                getOSMPrior(points[i].x, points[i].y, temp_m_i);
-                uint32_t raw_label = labels[i];
-                auto it_matrix = config_.label_to_matrix_idx.find(raw_label);
-                if (it_matrix != config_.label_to_matrix_idx.end()) {
-                    point_k_sem[i] = getSemanticKernel(it_matrix->second, temp_m_i);
+                getOSMPrior(points[i].x, points[i].y, tl_m_i);
+                int raw_label = static_cast<int>(labels[i]);
+                int matrix_idx = (raw_label >= 0 && raw_label <= max_raw_label_)
+                                 ? label_to_matrix_flat_[static_cast<size_t>(raw_label)] : -1;
+                if (matrix_idx >= 0) {
+                    point_k_sem[i] = getSemanticKernel(matrix_idx, tl_m_i, tl_expected_obs);
                 }
             }
         }
 #else
-        std::vector<float> temp_m_i(static_cast<size_t>(K_prior_));
+        std::vector<float> tl_m_i(static_cast<size_t>(K_prior_));
+        std::vector<float> tl_expected_obs(static_cast<size_t>(K_pred_));
         for (size_t i = 0; i < n; i++) {
-            getOSMPrior(points[i].x, points[i].y, temp_m_i);
-            uint32_t raw_label = labels[i];
-            auto it_matrix = config_.label_to_matrix_idx.find(raw_label);
-            if (it_matrix != config_.label_to_matrix_idx.end()) {
-                point_k_sem[i] = getSemanticKernel(it_matrix->second, temp_m_i);
+            getOSMPrior(points[i].x, points[i].y, tl_m_i);
+            int raw_label = static_cast<int>(labels[i]);
+            int matrix_idx = (raw_label >= 0 && raw_label <= max_raw_label_)
+                             ? label_to_matrix_flat_[static_cast<size_t>(raw_label)] : -1;
+            if (matrix_idx >= 0) {
+                point_k_sem[i] = getSemanticKernel(matrix_idx, tl_m_i, tl_expected_obs);
             }
         }
 #endif
@@ -380,9 +572,9 @@ void ContinuousBKI::update(const std::vector<uint32_t>& labels, const std::vecto
 
     int num_shards = static_cast<int>(block_shards_.size());
     int radius = static_cast<int>(std::ceil(l_scale_ / resolution_));
+    float l_scale_sq = l_scale_ * l_scale_;
 
     // Pre-compute which shards each point's influence region touches.
-    // This fixes cross-block-boundary updates that were previously dropped.
     std::vector<std::vector<size_t>> shard_points(static_cast<size_t>(num_shards));
     for (size_t i = 0; i < n; i++) {
         VoxelKey vk_p = pointToKey(points[i]);
@@ -405,9 +597,18 @@ void ContinuousBKI::update(const std::vector<uint32_t>& labels, const std::vecto
 #ifdef _OPENMP
 #pragma omp parallel num_threads(num_shards)
     {
+        // Thread-local buffers for getOrCreateBlock -> initVoxelAlpha -> computePredPriorFromOSM
+        std::vector<float> tl_m_i(static_cast<size_t>(K_prior_));
+        std::vector<float> tl_p_super(static_cast<size_t>(K_pred_));
+        std::vector<float> tl_p_pred(static_cast<size_t>(config_.num_total_classes));
 #pragma omp for schedule(static, 1)
 #endif
     for (int s = 0; s < num_shards; ++s) {
+#ifndef _OPENMP
+        std::vector<float> tl_m_i(static_cast<size_t>(K_prior_));
+        std::vector<float> tl_p_super(static_cast<size_t>(K_pred_));
+        std::vector<float> tl_p_pred(static_cast<size_t>(config_.num_total_classes));
+#endif
         auto& shard = block_shards_[static_cast<size_t>(s)];
         const std::vector<size_t>& pts = shard_points[static_cast<size_t>(s)];
 
@@ -416,30 +617,34 @@ void ContinuousBKI::update(const std::vector<uint32_t>& labels, const std::vecto
             const Point3D& p = points[i];
             VoxelKey vk_p = pointToKey(p);
 
-            uint32_t raw_label = labels[i];
-            auto it_dense = config_.raw_to_dense.find(raw_label);
-            if (it_dense == config_.raw_to_dense.end()) continue;
-            int dense_label = it_dense->second;
+            int raw_label = static_cast<int>(labels[i]);
+            int dense_label = (raw_label >= 0 && raw_label <= max_raw_label_)
+                              ? raw_to_dense_flat_[static_cast<size_t>(raw_label)] : -1;
+            if (dense_label < 0) continue;
             float k_sem = point_k_sem[i];
 
             for (int dx = -radius; dx <= radius; dx++) {
-                for (int dy = -radius; dy <= radius; dy++) {
-                    for (int dz = -radius; dz <= radius; dz++) {
+                int dy_limit = static_cast<int>(std::sqrt(std::max(0.0f,
+                    static_cast<float>(radius * radius - dx * dx))));
+                for (int dy = -dy_limit; dy <= dy_limit; dy++) {
+                    int dz_limit = static_cast<int>(std::sqrt(std::max(0.0f,
+                        static_cast<float>(radius * radius - dx * dx - dy * dy))));
+                    for (int dz = -dz_limit; dz <= dz_limit; dz++) {
                         VoxelKey vk = {vk_p.x + dx, vk_p.y + dy, vk_p.z + dz};
                         BlockKey bk = voxelToBlockKey(vk);
                         if (getShardIndex(bk) != s) continue;
 
                         Point3D v_center = keyToPoint(vk);
                         float dist_sq = p.dist_sq(v_center);
-                        if (dist_sq > l_scale_ * l_scale_) continue;
+                        if (dist_sq > l_scale_sq) continue;
 
                         float k_sp = computeSpatialKernel(dist_sq);
                         if (k_sp <= 1e-6f) continue;
 
-                        Block& blk = getOrCreateBlock(shard, bk);
-                        int lx, ly, lz;
-                        voxelToLocal(vk, lx, ly, lz);
-                        int idx = flatIndex(lx, ly, lz, dense_label);
+                        Block& blk = getOrCreateBlock(shard, bk, tl_m_i, tl_p_super, tl_p_pred);
+                        int lx, ly, lz_local;
+                        voxelToLocal(vk, lx, ly, lz_local);
+                        int idx = flatIndex(lx, ly, lz_local, dense_label);
                         blk.alpha[static_cast<size_t>(idx)] += k_sp * k_sem;
                     }
                 }
@@ -451,6 +656,9 @@ void ContinuousBKI::update(const std::vector<uint32_t>& labels, const std::vecto
 #endif
 }
 
+// =====================================================================
+// update (probs overload)
+// =====================================================================
 void ContinuousBKI::update(const std::vector<std::vector<float>>& probs, const std::vector<Point3D>& points, const std::vector<float>& weights) {
     if (probs.size() != points.size()) {
         std::cerr << "Mismatch in points and probs size" << std::endl;
@@ -465,6 +673,7 @@ void ContinuousBKI::update(const std::vector<std::vector<float>>& probs, const s
     size_t n = points.size();
     int num_shards = static_cast<int>(block_shards_.size());
     int radius = static_cast<int>(std::ceil(l_scale_ / resolution_));
+    float l_scale_sq = l_scale_ * l_scale_;
 
     // Pre-compute which shards each point's influence region touches.
     std::vector<std::vector<size_t>> shard_points(static_cast<size_t>(num_shards));
@@ -489,9 +698,17 @@ void ContinuousBKI::update(const std::vector<std::vector<float>>& probs, const s
 #ifdef _OPENMP
 #pragma omp parallel num_threads(num_shards)
     {
+        std::vector<float> tl_m_i(static_cast<size_t>(K_prior_));
+        std::vector<float> tl_p_super(static_cast<size_t>(K_pred_));
+        std::vector<float> tl_p_pred(static_cast<size_t>(config_.num_total_classes));
 #pragma omp for schedule(static, 1)
 #endif
     for (int s = 0; s < num_shards; ++s) {
+#ifndef _OPENMP
+        std::vector<float> tl_m_i(static_cast<size_t>(K_prior_));
+        std::vector<float> tl_p_super(static_cast<size_t>(K_pred_));
+        std::vector<float> tl_p_pred(static_cast<size_t>(config_.num_total_classes));
+#endif
         auto& shard = block_shards_[static_cast<size_t>(s)];
         const std::vector<size_t>& pts = shard_points[static_cast<size_t>(s)];
 
@@ -504,25 +721,29 @@ void ContinuousBKI::update(const std::vector<std::vector<float>>& probs, const s
             float w_i = use_weights ? weights[i] : 1.0f;
 
             for (int dx = -radius; dx <= radius; dx++) {
-                for (int dy = -radius; dy <= radius; dy++) {
-                    for (int dz = -radius; dz <= radius; dz++) {
+                int dy_limit = static_cast<int>(std::sqrt(std::max(0.0f,
+                    static_cast<float>(radius * radius - dx * dx))));
+                for (int dy = -dy_limit; dy <= dy_limit; dy++) {
+                    int dz_limit = static_cast<int>(std::sqrt(std::max(0.0f,
+                        static_cast<float>(radius * radius - dx * dx - dy * dy))));
+                    for (int dz = -dz_limit; dz <= dz_limit; dz++) {
                         VoxelKey vk = {vk_p.x + dx, vk_p.y + dy, vk_p.z + dz};
                         BlockKey bk = voxelToBlockKey(vk);
                         if (getShardIndex(bk) != s) continue;
 
                         Point3D v_center = keyToPoint(vk);
                         float dist_sq = p.dist_sq(v_center);
-                        if (dist_sq > l_scale_ * l_scale_) continue;
+                        if (dist_sq > l_scale_sq) continue;
 
                         float k_sp = computeSpatialKernel(dist_sq);
                         if (k_sp <= 1e-6f) continue;
 
-                        Block& blk = getOrCreateBlock(shard, bk);
-                        int lx, ly, lz;
-                        voxelToLocal(vk, lx, ly, lz);
+                        Block& blk = getOrCreateBlock(shard, bk, tl_m_i, tl_p_super, tl_p_pred);
+                        int lx, ly, lz_local;
+                        voxelToLocal(vk, lx, ly, lz_local);
 
                         for (size_t c = 0; c < prob.size(); c++) {
-                            int idx = flatIndex(lx, ly, lz, static_cast<int>(c));
+                            int idx = flatIndex(lx, ly, lz_local, static_cast<int>(c));
                             blk.alpha[static_cast<size_t>(idx)] += w_i * k_sp * prob[c];
                         }
                     }
@@ -616,12 +837,67 @@ void ContinuousBKI::load(const std::string& filename) {
     in.close();
 }
 
+// =====================================================================
+// infer - parallelized with OpenMP
+// =====================================================================
 std::vector<uint32_t> ContinuousBKI::infer(const std::vector<Point3D>& points) const {
-    std::vector<uint32_t> results;
-    results.reserve(points.size());
+    const size_t n = points.size();
+    std::vector<uint32_t> results(n, 0);
 
-    std::vector<float> fallback_pred;
-    for (const auto& p : points) {
+#ifdef _OPENMP
+#pragma omp parallel
+    {
+        // Thread-local buffers for OSM fallback path
+        std::vector<float> tl_p_pred(static_cast<size_t>(config_.num_total_classes));
+        std::vector<float> tl_m_i(static_cast<size_t>(K_prior_));
+        std::vector<float> tl_p_super(static_cast<size_t>(K_pred_));
+
+#pragma omp for schedule(static)
+        for (size_t i = 0; i < n; i++) {
+            const Point3D& p = points[i];
+            VoxelKey k = pointToKey(p);
+            BlockKey bk = voxelToBlockKey(k);
+            int s = getShardIndex(bk);
+            const Block* blk = getBlockConst(block_shards_[static_cast<size_t>(s)], bk);
+
+            if (blk != nullptr) {
+                int lx, ly, lz;
+                voxelToLocal(k, lx, ly, lz);
+                float sum = 0.0f;
+                int best_idx = 0;
+                float best_val = -1.0f;
+                for (int c = 0; c < config_.num_total_classes; c++) {
+                    float v = blk->alpha[static_cast<size_t>(flatIndex(lx, ly, lz, c))];
+                    sum += v;
+                    if (v > best_val) { best_val = v; best_idx = c; }
+                }
+                if (sum > epsilon_) {
+                    int raw = (best_idx >= 0 && best_idx < static_cast<int>(dense_to_raw_flat_.size()))
+                              ? dense_to_raw_flat_[static_cast<size_t>(best_idx)] : -1;
+                    results[i] = (raw >= 0) ? static_cast<uint32_t>(raw) : 0;
+                    continue;
+                }
+            }
+
+            if (osm_fallback_in_infer_ && K_pred_ > 0) {
+                computePredPriorFromOSM(p.x, p.y, tl_p_pred, tl_m_i, tl_p_super);
+                if (!tl_p_pred.empty()) {
+                    int best = static_cast<int>(std::max_element(tl_p_pred.begin(), tl_p_pred.end()) - tl_p_pred.begin());
+                    if (best >= 0 && best < static_cast<int>(dense_to_raw_flat_.size())) {
+                        int raw = dense_to_raw_flat_[static_cast<size_t>(best)];
+                        results[i] = (raw >= 0) ? static_cast<uint32_t>(raw) : 0;
+                    }
+                }
+            }
+        }
+    }
+#else
+    std::vector<float> tl_p_pred(static_cast<size_t>(config_.num_total_classes));
+    std::vector<float> tl_m_i(static_cast<size_t>(K_prior_));
+    std::vector<float> tl_p_super(static_cast<size_t>(K_pred_));
+
+    for (size_t i = 0; i < n; i++) {
+        const Point3D& p = points[i];
         VoxelKey k = pointToKey(p);
         BlockKey bk = voxelToBlockKey(k);
         int s = getShardIndex(bk);
@@ -639,49 +915,90 @@ std::vector<uint32_t> ContinuousBKI::infer(const std::vector<Point3D>& points) c
                 if (v > best_val) { best_val = v; best_idx = c; }
             }
             if (sum > epsilon_) {
-                auto it_raw = config_.dense_to_raw.find(best_idx);
-                if (it_raw != config_.dense_to_raw.end()) {
-                    results.push_back(it_raw->second);
-                } else {
-                    results.push_back(0);
-                }
+                int raw = (best_idx >= 0 && best_idx < static_cast<int>(dense_to_raw_flat_.size()))
+                          ? dense_to_raw_flat_[static_cast<size_t>(best_idx)] : -1;
+                results[i] = (raw >= 0) ? static_cast<uint32_t>(raw) : 0;
                 continue;
             }
         }
 
         if (osm_fallback_in_infer_ && K_pred_ > 0) {
-            computePredPriorFromOSM(p.x, p.y, fallback_pred);
-            if (!fallback_pred.empty()) {
-                int best = static_cast<int>(std::max_element(fallback_pred.begin(), fallback_pred.end()) - fallback_pred.begin());
-                if (best < config_.num_total_classes) {
-                    auto it_raw = config_.dense_to_raw.find(best);
-                    if (it_raw != config_.dense_to_raw.end()) {
-                        results.push_back(it_raw->second);
-                    } else {
-                        results.push_back(0);
-                    }
-                } else {
-                    results.push_back(0);
+            computePredPriorFromOSM(p.x, p.y, tl_p_pred, tl_m_i, tl_p_super);
+            if (!tl_p_pred.empty()) {
+                int best = static_cast<int>(std::max_element(tl_p_pred.begin(), tl_p_pred.end()) - tl_p_pred.begin());
+                if (best >= 0 && best < static_cast<int>(dense_to_raw_flat_.size())) {
+                    int raw = dense_to_raw_flat_[static_cast<size_t>(best)];
+                    results[i] = (raw >= 0) ? static_cast<uint32_t>(raw) : 0;
                 }
-            } else {
-                results.push_back(0);
             }
-        } else {
-            results.push_back(0);
         }
     }
+#endif
+
     return results;
 }
 
+// =====================================================================
+// infer_probs - parallelized with OpenMP
+// =====================================================================
 std::vector<std::vector<float>> ContinuousBKI::infer_probs(const std::vector<Point3D>& points) const {
-    std::vector<std::vector<float>> results;
-    results.reserve(points.size());
-
+    const size_t n = points.size();
     const int K = config_.num_total_classes;
-    std::vector<float> fallback_pred;
-    std::vector<float> uniform(K, 1.0f / static_cast<float>(K));
+    std::vector<std::vector<float>> results(n);
 
-    for (const auto& p : points) {
+#ifdef _OPENMP
+#pragma omp parallel
+    {
+        std::vector<float> tl_probs(static_cast<size_t>(K));
+        std::vector<float> tl_p_pred(static_cast<size_t>(K));
+        std::vector<float> tl_m_i(static_cast<size_t>(K_prior_));
+        std::vector<float> tl_p_super(static_cast<size_t>(K_pred_));
+        std::vector<float> uniform(static_cast<size_t>(K), 1.0f / static_cast<float>(K));
+
+#pragma omp for schedule(static)
+        for (size_t i = 0; i < n; i++) {
+            const Point3D& p = points[i];
+            VoxelKey k = pointToKey(p);
+            BlockKey bk = voxelToBlockKey(k);
+            int s = getShardIndex(bk);
+            const Block* blk = getBlockConst(block_shards_[static_cast<size_t>(s)], bk);
+
+            if (blk != nullptr) {
+                int lx, ly, lz;
+                voxelToLocal(k, lx, ly, lz);
+                float sum = 0.0f;
+                for (int c = 0; c < K; c++) {
+                    tl_probs[c] = blk->alpha[static_cast<size_t>(flatIndex(lx, ly, lz, c))];
+                    sum += tl_probs[c];
+                }
+                if (sum > epsilon_) {
+                    for (int c = 0; c < K; c++) tl_probs[c] /= sum;
+                    results[i] = tl_probs;
+                    continue;
+                }
+            }
+
+            if (osm_fallback_in_infer_ && K_pred_ > 0) {
+                computePredPriorFromOSM(p.x, p.y, tl_p_pred, tl_m_i, tl_p_super);
+                if (tl_p_pred.size() == static_cast<size_t>(K)) {
+                    results[i] = tl_p_pred;
+                } else {
+                    results[i] = uniform;
+                }
+            } else {
+                results[i] = uniform;
+            }
+        }
+    }
+#else
+    std::vector<float> tl_probs(static_cast<size_t>(K));
+    std::vector<float> tl_p_pred(static_cast<size_t>(K));
+    std::vector<float> tl_m_i(static_cast<size_t>(K_prior_));
+    std::vector<float> tl_p_super(static_cast<size_t>(K_pred_));
+    std::vector<float> uniform(static_cast<size_t>(K), 1.0f / static_cast<float>(K));
+
+    for (size_t i = 0; i < n; i++) {
+        const Point3D& p = points[i];
         VoxelKey k = pointToKey(p);
         BlockKey bk = voxelToBlockKey(k);
         int s = getShardIndex(bk);
@@ -690,30 +1007,31 @@ std::vector<std::vector<float>> ContinuousBKI::infer_probs(const std::vector<Poi
         if (blk != nullptr) {
             int lx, ly, lz;
             voxelToLocal(k, lx, ly, lz);
-            std::vector<float> probs(static_cast<size_t>(K), 0.0f);
             float sum = 0.0f;
             for (int c = 0; c < K; c++) {
-                probs[static_cast<size_t>(c)] = blk->alpha[static_cast<size_t>(flatIndex(lx, ly, lz, c))];
-                sum += probs[static_cast<size_t>(c)];
+                tl_probs[c] = blk->alpha[static_cast<size_t>(flatIndex(lx, ly, lz, c))];
+                sum += tl_probs[c];
             }
             if (sum > epsilon_) {
-                for (float& v : probs) v /= sum;
-                results.push_back(probs);
+                for (int c = 0; c < K; c++) tl_probs[c] /= sum;
+                results[i] = tl_probs;
                 continue;
             }
         }
 
         if (osm_fallback_in_infer_ && K_pred_ > 0) {
-            computePredPriorFromOSM(p.x, p.y, fallback_pred);
-            if (fallback_pred.size() == static_cast<size_t>(K)) {
-                results.push_back(fallback_pred);
+            computePredPriorFromOSM(p.x, p.y, tl_p_pred, tl_m_i, tl_p_super);
+            if (tl_p_pred.size() == static_cast<size_t>(K)) {
+                results[i] = tl_p_pred;
             } else {
-                results.push_back(uniform);
+                results[i] = uniform;
             }
         } else {
-            results.push_back(uniform);
+            results[i] = uniform;
         }
     }
+#endif
+
     return results;
 }
 
@@ -767,14 +1085,11 @@ OSMData loadOSMBinary(const std::string& filename,
 }
 
 // Classify a way's tags into an OSM class index.
-// Uses explicit priority ordering (building > highway > landuse > natural > barrier > amenity)
-// instead of relying on std::map alphabetical iteration.
 static int classifyWayTags(const std::map<std::string, std::string>& tags,
                            const std::map<std::string, int>& osm_class_map,
                            bool& is_area) {
     is_area = false;
 
-    // Priority 1: Buildings
     auto it = tags.find("building");
     if (it != tags.end()) {
         is_area = true;
@@ -782,11 +1097,10 @@ static int classifyWayTags(const std::map<std::string, std::string>& tags,
         return (c != osm_class_map.end()) ? c->second : -1;
     }
 
-    // Priority 2: Roads / sidewalks
     it = tags.find("highway");
     if (it != tags.end()) {
         const std::string& val = it->second;
-        is_area = false;  // Roads are lines, not areas
+        is_area = false;
         if (val == "footway" || val == "path" || val == "steps" || val == "pedestrian") {
             auto c = osm_class_map.find("sidewalks");
             return (c != osm_class_map.end()) ? c->second : -1;
@@ -796,7 +1110,6 @@ static int classifyWayTags(const std::map<std::string, std::string>& tags,
         }
     }
 
-    // Priority 3: Landuse
     it = tags.find("landuse");
     if (it != tags.end()) {
         is_area = true;
@@ -811,7 +1124,6 @@ static int classifyWayTags(const std::map<std::string, std::string>& tags,
         return -1;
     }
 
-    // Priority 4: Natural features
     it = tags.find("natural");
     if (it != tags.end()) {
         is_area = true;
@@ -826,7 +1138,6 @@ static int classifyWayTags(const std::map<std::string, std::string>& tags,
         return -1;
     }
 
-    // Priority 5: Barriers / fences
     it = tags.find("barrier");
     if (it != tags.end()) {
         is_area = false;
@@ -838,7 +1149,6 @@ static int classifyWayTags(const std::map<std::string, std::string>& tags,
         return -1;
     }
 
-    // Priority 6: Amenity (parking)
     it = tags.find("amenity");
     if (it != tags.end()) {
         is_area = true;
@@ -852,13 +1162,10 @@ static int classifyWayTags(const std::map<std::string, std::string>& tags,
     return -1;
 }
 
-// Buffer an open polyline into a polygon with a given half-width.
-// Returns a rectangle around each segment.
 static Polygon bufferPolyline(const std::vector<Point2D>& coords, float half_width) {
     Polygon poly;
     if (coords.size() < 2) return poly;
 
-    // For each segment, compute perpendicular offset
     std::vector<Point2D> left_side, right_side;
     for (size_t i = 0; i < coords.size() - 1; i++) {
         float dx = coords[i+1].x - coords[i].x;
@@ -876,7 +1183,6 @@ static Polygon bufferPolyline(const std::vector<Point2D>& coords, float half_wid
         right_side.push_back(Point2D(coords[i+1].x - nx, coords[i+1].y - ny));
     }
 
-    // Combine: left forward, then right reversed
     for (const auto& p : left_side) poly.points.push_back(p);
     for (auto it = right_side.rbegin(); it != right_side.rend(); ++it) {
         poly.points.push_back(*it);
@@ -906,20 +1212,10 @@ OSMData loadOSMXML(const std::string& filename,
         return data;
     }
     
-    // Set up coordinate projection using flat-earth (equirectangular) projection.
-    // This matches the projection used by visualize_osm_xml.py, which computes
-    // the origin from the OSM file's <bounds> centroid.  When the .osm file has
-    // been pre-aligned with that script, using the same projection here ensures
-    // the coordinates land in the correct world-frame position.
-    //
-    // Determine origin: use the <bounds> centroid when available (matching the
-    // Python alignment tool), otherwise fall back to the node centroid.
     double origin_lat, origin_lon;
     double offset_x = config.osm_world_offset_x;
     double offset_y = config.osm_world_offset_y;
 
-    // Try to read <bounds> from the file.  The element can appear anywhere
-    // (Python's ElementTree may place it at the end), so scan the whole file.
     {
         std::ifstream bounds_scan(filename);
         std::string bline;
@@ -946,7 +1242,6 @@ OSMData loadOSMXML(const std::string& filename,
             }
         }
         if (!found_bounds) {
-            // Fall back to node centroid (same as get_center())
             auto center = parser.get_center();
             origin_lat = center.first;
             origin_lon = center.second;
@@ -959,7 +1254,6 @@ OSMData loadOSMXML(const std::string& filename,
               << origin_lat << ", " << origin_lon
               << "), world offset (" << offset_x << ", " << offset_y << ")" << std::endl;
 
-    // Convert nodes to world-frame coordinates using flat-earth projection
     std::map<std::string, Point2D> node_coords;
 
     for (const auto& kv : parser.nodes) {
@@ -970,7 +1264,6 @@ OSMData loadOSMXML(const std::string& filename,
         node_coords[kv.first] = Point2D(static_cast<float>(x), static_cast<float>(y));
     }
     
-    // Extract point features from nodes
     for (const auto& kv : parser.nodes) {
         const osm_xml_parser::OSMNode& node = kv.second;
         const Point2D& pt = node_coords[kv.first];
@@ -1005,10 +1298,9 @@ OSMData loadOSMXML(const std::string& filename,
         }
     }
     
-    // Extract polygons/polylines from ways
-    constexpr float ROAD_HALF_WIDTH = 3.0f;     // 6m total road width
-    constexpr float SIDEWALK_HALF_WIDTH = 1.5f;  // 3m total sidewalk width
-    constexpr float FENCE_HALF_WIDTH = 0.3f;     // 0.6m fence width
+    constexpr float ROAD_HALF_WIDTH = 3.0f;
+    constexpr float SIDEWALK_HALF_WIDTH = 1.5f;
+    constexpr float FENCE_HALF_WIDTH = 0.3f;
 
     int polygon_count = 0, polyline_count = 0;
     for (const auto& way : parser.ways) {
@@ -1031,17 +1323,14 @@ OSMData loadOSMXML(const std::string& filename,
         bool way_is_closed = way.is_closed();
 
         if (is_area && way_is_closed && coords.size() >= 3) {
-            // Closed polygon (buildings, parks, etc.)
             Polygon poly;
             poly.points = coords;
             poly.computeBounds();
             data.geometries[class_idx].push_back(poly);
             polygon_count++;
         } else if (!is_area || !way_is_closed) {
-            // Open polyline (roads, sidewalks, fences) -> buffer into polygon
             float hw = ROAD_HALF_WIDTH;
 
-            // Check if this is a sidewalk or fence for narrower buffering
             auto hw_it = way.tags.find("highway");
             if (hw_it != way.tags.end()) {
                 const std::string& v = hw_it->second;
@@ -1076,7 +1365,6 @@ OSMData loadOSMXML(const std::string& filename,
 
 OSMData loadOSM(const std::string& filename,
                 const Config& config) {
-    // Auto-detect format based on file extension
     if (filename.size() >= 4 && filename.substr(filename.size() - 4) == ".osm") {
         return loadOSMXML(filename, config);
     } else {
@@ -1114,7 +1402,6 @@ Config loadConfigFromYAML(const std::string& config_path) {
         }
         config.num_total_classes = static_cast<int>(all_classes.size());
 
-        // Parse optional OSM origin for XML coordinate projection
         auto scalar_it = yaml.scalars.find("osm_origin_lat");
         if (scalar_it != yaml.scalars.end()) {
             config.osm_origin_lat = std::stod(scalar_it->second);
