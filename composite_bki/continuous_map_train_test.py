@@ -116,7 +116,7 @@ def compute_metrics(pred, gt, ignore_label=0):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Train continuous BKI on first half of scans (world frame), evaluate on the same scans."
+        description="Train continuous BKI with offset-based scan subsampling and evaluate on held-out in-between scans."
     )
     parser.add_argument("--scan-dir", required=True, help="Directory of .bin scans")
     parser.add_argument("--label-dir", required=True, help="Directory of prediction labels (.label or .bin)")
@@ -126,6 +126,9 @@ def main():
     parser.add_argument("--gt-dir", default=None, help="Optional: directory of ground-truth labels for test half metrics")
     parser.add_argument("--output-dir", default=None, help="Optional: save refined labels for test scans here")
     parser.add_argument("--map-state", default=None, help="Optional: path to save trained map state")
+    parser.add_argument("--offset", type=int, default=1, help="Train on every Nth scan; use in-between scans for testing (N>=1)")
+    parser.add_argument("--test-fraction", type=float, default=1.0, help="Fraction of selected test scans to evaluate (0 < f <= 1)")
+    parser.add_argument("--max-scans", type=int, default=None, help="Optional cap on number of scans to use from the sorted list")
     parser.add_argument("--resolution", type=float, default=1.0, help="BKI resolution")
     parser.add_argument("--l-scale", type=float, default=3.0, help="BKI l_scale")
     parser.add_argument("--sigma-0", type=float, default=1.0, help="BKI sigma_0")
@@ -160,14 +163,60 @@ def main():
         print(f"No .bin scans in {scan_dir}", file=sys.stderr)
         return 1
 
-    n_total = len(scan_files)
-    # Use ALL scans for both training and testing
-    n_train = n_total
-    n_test = n_total
-    train_files = scan_files
-    test_files = scan_files
+    if args.max_scans is not None:
+        if args.max_scans <= 0:
+            print("ERROR: --max-scans must be > 0", file=sys.stderr)
+            return 1
+        if args.max_scans < len(scan_files):
+            scan_files = scan_files[:args.max_scans]
 
-    print(f"Scans: {n_total} total -> Using ALL {n_total} scans for training and testing")
+    if args.offset < 1:
+        print("ERROR: --offset must be >= 1", file=sys.stderr)
+        return 1
+    if args.test_fraction <= 0.0 or args.test_fraction > 1.0:
+        print("ERROR: --test-fraction must be in (0, 1]", file=sys.stderr)
+        return 1
+
+    n_total = len(scan_files)
+    if args.offset == 1:
+        # Backward-compatible behavior: all scans contribute to map and are evaluated.
+        train_files = scan_files
+        candidate_test_files = scan_files
+        print(f"Scans: {n_total} total -> offset=1, using all scans for both training and testing")
+    else:
+        train_files = [f for i, f in enumerate(scan_files) if i % args.offset == 0]
+        candidate_test_files = [f for i, f in enumerate(scan_files) if i % args.offset != 0]
+        print(
+            f"Scans: {n_total} total -> offset={args.offset}, "
+            f"training on {len(train_files)} scans (every {args.offset}th), "
+            f"testing candidate set has {len(candidate_test_files)} in-between scans"
+        )
+
+    # Optionally downsample test scans using deterministic uniform index spacing.
+    if candidate_test_files and args.test_fraction < 1.0:
+        n_candidates = len(candidate_test_files)
+        n_keep = max(1, int(np.ceil(n_candidates * args.test_fraction)))
+        keep_idxs = np.linspace(0, n_candidates - 1, n_keep, dtype=int)
+        test_files = [candidate_test_files[i] for i in keep_idxs]
+    else:
+        test_files = candidate_test_files
+
+    print(
+        f"Final test split: {len(test_files)} / {len(candidate_test_files)} "
+        f"candidate scans (test_fraction={args.test_fraction:.3f})"
+    )
+    if n_total > 0:
+        pct_total = 100.0 * len(test_files) / n_total
+    else:
+        pct_total = 0.0
+    if len(candidate_test_files) > 0:
+        pct_candidates = 100.0 * len(test_files) / len(candidate_test_files)
+    else:
+        pct_candidates = 0.0
+    print(
+        f"Testing will run on {len(test_files)} scans "
+        f"({pct_total:.1f}% of total, {pct_candidates:.1f}% of candidate test set)."
+    )
 
     poses = None
     if args.pose:
@@ -283,8 +332,8 @@ def main():
         bki_nokernels.save(base + "_nokernels" + (ext or ""))
         print(f"  Saved maps to {base}_sem / {base}_nosem / {base}_nokernels")
 
-    # Evaluate on the same files used for training
-    print("\n--- Testing (same files as training) ---")
+    # Evaluate on held-out scans selected by offset
+    print("\n--- Testing (offset holdout scans) ---")
     all_metrics_sem = []
     all_metrics_nosem = []
     all_metrics_nokernels = []
@@ -293,7 +342,7 @@ def main():
     if args.output_dir:
         os.makedirs(args.output_dir, exist_ok=True)
 
-    for scan_path in train_files:
+    for scan_path in test_files:
         stem = scan_path.stem
         frame = get_frame_number(stem)
         points_xyz, _ = load_scan(str(scan_path))
@@ -338,6 +387,14 @@ def main():
         miou_nokernels = np.mean([m["miou"] for m in all_metrics_nokernels])
         
         print(f"  Test scans with GT: {len(all_metrics_sem)}")
+        if len(test_files) > 0:
+            pct_gt = 100.0 * len(all_metrics_sem) / len(test_files)
+        else:
+            pct_gt = 0.0
+        print(
+            f"  Evaluated {len(all_metrics_sem)} / {len(test_files)} selected test scans "
+            f"({pct_gt:.1f}% had matching GT)."
+        )
         if all_metrics_baseline:
             acc_base = np.mean([m["accuracy"] for m in all_metrics_baseline])
             miou_base = np.mean([m["miou"] for m in all_metrics_baseline])
@@ -347,7 +404,9 @@ def main():
         print("  Without semantic kernel: Accuracy {:.4f}  mIoU {:.4f}".format(acc_nosem, miou_nosem))
         print("  Without ANY kernels:     Accuracy {:.4f}  mIoU {:.4f}".format(acc_nokernels, miou_nokernels))
     else:
-        if args.gt_dir:
+        if not test_files:
+            print("  No test scans selected by offset. Increase --offset to create holdout scans.")
+        elif args.gt_dir:
             print("  No test scans had matching GT labels.")
         else:
             print("  No --gt-dir provided; skipping metrics.")
