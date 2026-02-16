@@ -37,8 +37,6 @@ def convert_kitti_to_mcd(input_path, output_path):
     sem_labels = raw_data & 0xFFFF
     instance_ids = raw_data & 0xFFFF0000
     
-    print(f"Loaded {len(sem_labels)} points.")
-    
     # Create output array initialized to 'Other' (12) or 0 (Barrier) for unknown classes
     # Using 12 (Other) as safe default for unmatched classes
     new_sem_labels = np.full_like(sem_labels, 12) 
@@ -52,8 +50,6 @@ def convert_kitti_to_mcd(input_path, output_path):
             new_sem_labels[mask] = m_id
             mapped_count += count
             
-    print(f"Mapped {mapped_count}/{len(sem_labels)} labels ({mapped_count/len(sem_labels)*100:.2f}%)")
-    
     # Check for unmapped labels
     unique_unmapped = np.unique(sem_labels[new_sem_labels == 12])
     # Filter out ones that were explicitly mapped to 12
@@ -68,16 +64,37 @@ def convert_kitti_to_mcd(input_path, output_path):
     
     print(f"Saving MCD labels to {output_path}...")
     final_data.tofile(output_path)
-    print("Done.")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Convert SemanticKITTI label file to MCD label file")
+    parser = argparse.ArgumentParser(description="Convert SemanticKITTI label file(s) to MCD label file(s)")
     
     parser.add_argument("--input", type=str, required=True, 
-                        help="Path to input SemanticKITTI .label/.bin file")
+                        help="Path to input SemanticKITTI .label/.bin file OR directory")
     parser.add_argument("--output", type=str, required=True, 
-                        help="Path to save output MCD .label/.bin file")
+                        help="Path to save output MCD .label/.bin file OR directory")
     
     args = parser.parse_args()
     
-    convert_kitti_to_mcd(args.input, args.output)
+    if os.path.isdir(args.input):
+        if not os.path.exists(args.output):
+            os.makedirs(args.output)
+        elif not os.path.isdir(args.output):
+            raise NotADirectoryError(f"Output must be a directory if input is a directory: {args.output}")
+            
+        import glob
+        input_files = sorted(glob.glob(os.path.join(args.input, "*.label")))
+        if not input_files:
+             input_files = sorted(glob.glob(os.path.join(args.input, "*.bin")))
+             
+        print(f"Found {len(input_files)} files in {args.input}")
+        
+        for in_file in input_files:
+            filename = os.path.basename(in_file)
+            out_file = os.path.join(args.output, filename)
+            convert_kitti_to_mcd(in_file, out_file)
+            
+        print("Batch conversion done.")
+    else:
+        # Single file mode
+        convert_kitti_to_mcd(args.input, args.output)
+        print("Done.")
