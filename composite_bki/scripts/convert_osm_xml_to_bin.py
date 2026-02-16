@@ -4,7 +4,7 @@ Convert OSM XML (.osm) to Custom Binary Format (.bin).
 Compatible with the C++ BKI loader and visualization scripts.
 
 Usage:
-    python osm_xml_to_bin.py --input map.osm --output map.bin
+    python convert_osm_xml_to_bin.py --input map.osm --output map.bin
 """
 
 import argparse
