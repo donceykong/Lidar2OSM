@@ -238,7 +238,9 @@ ContinuousBKI::ContinuousBKI(const Config& config,
               float alpha0,
               bool seed_osm_prior,
               float osm_prior_strength,
-              bool osm_fallback_in_infer)
+              bool osm_fallback_in_infer,
+              float lambda_min,
+              float lambda_max)
     : config_(config),
       osm_data_(osm_data),
       resolution_(resolution),
@@ -253,7 +255,10 @@ ContinuousBKI::ContinuousBKI(const Config& config,
       alpha0_(alpha0),
       seed_osm_prior_(seed_osm_prior),
       osm_prior_strength_(osm_prior_strength),
-      osm_fallback_in_infer_(osm_fallback_in_infer)
+      osm_fallback_in_infer_(osm_fallback_in_infer),
+      lambda_min_(lambda_min),
+      lambda_max_(lambda_max),
+      current_time_(0)
 {
     K_pred_ = config.confusion_matrix.size();
     K_prior_ = config.confusion_matrix.empty() ? 0 : static_cast<int>(config.confusion_matrix[0].size());
@@ -358,14 +363,80 @@ Block& ContinuousBKI::getOrCreateBlock(
         const BlockKey& bk,
         std::vector<float>& buf_m_i,
         std::vector<float>& buf_p_super,
-        std::vector<float>& buf_p_pred) const {
+        std::vector<float>& buf_p_pred,
+        int current_time) const {
     auto it = shard_map.find(bk);
-    if (it != shard_map.end())
+    if (it != shard_map.end()) {
+        // Lazy decay: if block hasn't been updated this batch, apply forgetting
+        Block& blk = it->second;
+        if (blk.last_updated < current_time) {
+            int dt = current_time - blk.last_updated;
+            blk.last_updated = current_time;
+
+            // If lambda_max >= 1.0, maybe we skip decay? 
+            // But user asked for lambda in (0,1). Assuming lambda_max < 1.0 implies decay.
+            if (lambda_max_ < 1.0f) {
+                const int K = config_.num_total_classes;
+                
+                // Iterate all voxels in the block
+                for (int lz = 0; lz < BLOCK_SIZE; lz++) {
+                    for (int ly = 0; ly < BLOCK_SIZE; ly++) {
+                        for (int lx = 0; lx < BLOCK_SIZE; lx++) {
+                            // Compute world coordinate for OSM lookup
+                            int vx = bk.x * BLOCK_SIZE + lx;
+                            int vy = bk.y * BLOCK_SIZE + ly;
+                            // int vz = bk.z * BLOCK_SIZE + lz; // z not needed for 2D OSM prior
+                            float wx = (vx + 0.5f) * resolution_;
+                            float wy = (vy + 0.5f) * resolution_;
+
+                            // 1. Get OSM prior m_i (K_prior)
+                            // Reuse buf_m_i
+                            if (buf_m_i.size() != static_cast<size_t>(K_prior_))
+                                buf_m_i.resize(static_cast<size_t>(K_prior_));
+                            getOSMPrior(wx, wy, buf_m_i);
+
+                            // 2. Compute OSM confidence c_xi = max(m_i)
+                            float c_xi = 0.0f;
+                            for (float v : buf_m_i) if (v > c_xi) c_xi = v;
+
+                            // 3. Compute lambda(x)
+                            float lambda = lambda_max_ - (lambda_max_ - lambda_min_) * c_xi;
+                            
+                            // 4. Compute effective lambda for dt steps
+                            // If dt is large, pow might be slow. But dt is usually 1.
+                            float lambda_eff = (dt == 1) ? lambda : std::pow(lambda, static_cast<float>(dt));
+
+                            // 5. Compute alpha_osm(x)
+                            // alpha_osm = alpha0 + gamma * p_pred
+                            // We need p_pred. Reuse computePredPriorFromOSM logic but we already have m_i.
+                            // Let's just call computePredPriorFromOSM with the buffers, it re-calls getOSMPrior.
+                            // Optimization: computePredPriorFromOSM calls getOSMPrior internally. 
+                            // We can just call it directly.
+                            computePredPriorFromOSM(wx, wy, buf_p_pred, buf_m_i, buf_p_super);
+
+                            // 6. Apply decay: alpha = lambda_eff * alpha + (1-lambda_eff) * alpha_osm
+                            int idx_base = flatIndex(lx, ly, lz, 0);
+                            for (int c = 0; c < K; c++) {
+                                float alpha_osm_c = alpha0_;
+                                if (seed_osm_prior_ && osm_prior_strength_ > 0.0f && buf_p_pred.size() == static_cast<size_t>(K)) {
+                                    alpha_osm_c += osm_prior_strength_ * buf_p_pred[c];
+                                }
+                                
+                                float& alpha_curr = blk.alpha[static_cast<size_t>(idx_base + c)];
+                                alpha_curr = lambda_eff * alpha_curr + (1.0f - lambda_eff) * alpha_osm_c;
+                            }
+                        }
+                    }
+                }
+            }
+        }
         return it->second;
+    }
 
     Block blk;
     const size_t total = static_cast<size_t>(BLOCK_SIZE * BLOCK_SIZE * BLOCK_SIZE * config_.num_total_classes);
     blk.alpha.resize(total, alpha0_);
+    blk.last_updated = current_time; // Initialize with current time
 
     if (seed_osm_prior_ && osm_prior_strength_ > 0.0f) {
         for (int lz = 0; lz < BLOCK_SIZE; lz++) {
@@ -536,6 +607,9 @@ void ContinuousBKI::update(const std::vector<uint32_t>& labels, const std::vecto
 
     size_t n = points.size();
     std::vector<float> point_k_sem(n, 1.0f);
+    
+    // Increment global time for lazy decay
+    current_time_++;
 
     if (use_semantic_kernel_) {
 #ifdef _OPENMP
@@ -641,7 +715,7 @@ void ContinuousBKI::update(const std::vector<uint32_t>& labels, const std::vecto
                         float k_sp = computeSpatialKernel(dist_sq);
                         if (k_sp <= 1e-6f) continue;
 
-                        Block& blk = getOrCreateBlock(shard, bk, tl_m_i, tl_p_super, tl_p_pred);
+                        Block& blk = getOrCreateBlock(shard, bk, tl_m_i, tl_p_super, tl_p_pred, current_time_);
                         int lx, ly, lz_local;
                         voxelToLocal(vk, lx, ly, lz_local);
                         int idx = flatIndex(lx, ly, lz_local, dense_label);
@@ -674,6 +748,9 @@ void ContinuousBKI::update(const std::vector<std::vector<float>>& probs, const s
     int num_shards = static_cast<int>(block_shards_.size());
     int radius = static_cast<int>(std::ceil(l_scale_ / resolution_));
     float l_scale_sq = l_scale_ * l_scale_;
+
+    // Increment global time for lazy decay
+    current_time_++;
 
     // Pre-compute which shards each point's influence region touches.
     std::vector<std::vector<size_t>> shard_points(static_cast<size_t>(num_shards));
@@ -738,7 +815,7 @@ void ContinuousBKI::update(const std::vector<std::vector<float>>& probs, const s
                         float k_sp = computeSpatialKernel(dist_sq);
                         if (k_sp <= 1e-6f) continue;
 
-                        Block& blk = getOrCreateBlock(shard, bk, tl_m_i, tl_p_super, tl_p_pred);
+                        Block& blk = getOrCreateBlock(shard, bk, tl_m_i, tl_p_super, tl_p_pred, current_time_);
                         int lx, ly, lz_local;
                         voxelToLocal(vk, lx, ly, lz_local);
 
@@ -771,11 +848,12 @@ void ContinuousBKI::save(const std::string& filename) const {
         return;
     }
 
-    const uint8_t version = 2;
+    const uint8_t version = 3;
     out.write(reinterpret_cast<const char*>(&version), sizeof(uint8_t));
     out.write(reinterpret_cast<const char*>(&resolution_), sizeof(float));
     out.write(reinterpret_cast<const char*>(&l_scale_), sizeof(float));
     out.write(reinterpret_cast<const char*>(&sigma_0_), sizeof(float));
+    out.write(reinterpret_cast<const char*>(&current_time_), sizeof(int));
 
     size_t num_blocks = 0;
     for (const auto& shard : block_shards_) num_blocks += shard.size();
@@ -789,6 +867,7 @@ void ContinuousBKI::save(const std::string& filename) const {
             out.write(reinterpret_cast<const char*>(&bk.x), sizeof(int));
             out.write(reinterpret_cast<const char*>(&bk.y), sizeof(int));
             out.write(reinterpret_cast<const char*>(&bk.z), sizeof(int));
+            out.write(reinterpret_cast<const char*>(&blk.last_updated), sizeof(int));
             if (blk.alpha.size() == block_alpha_size) {
                 out.write(reinterpret_cast<const char*>(blk.alpha.data()), block_alpha_size * sizeof(float));
             }
@@ -806,8 +885,8 @@ void ContinuousBKI::load(const std::string& filename) {
 
     uint8_t version = 0;
     in.read(reinterpret_cast<char*>(&version), sizeof(uint8_t));
-    if (version != 2) {
-        std::cerr << "Unsupported map file version: " << static_cast<int>(version) << " (expected 2)" << std::endl;
+    if (version != 2 && version != 3) {
+        std::cerr << "Unsupported map file version: " << static_cast<int>(version) << " (expected 2 or 3)" << std::endl;
         return;
     }
 
@@ -815,6 +894,13 @@ void ContinuousBKI::load(const std::string& filename) {
     in.read(reinterpret_cast<char*>(&res), sizeof(float));
     in.read(reinterpret_cast<char*>(&l), sizeof(float));
     in.read(reinterpret_cast<char*>(&s0), sizeof(float));
+
+    if (version >= 3) {
+        in.read(reinterpret_cast<char*>(&current_time_), sizeof(int));
+    } else {
+        current_time_ = 0;
+    }
+
     if (std::abs(res - resolution_) > 1e-4f) std::cerr << "Warning: Loaded resolution mismatch" << std::endl;
 
     size_t num_blocks = 0;
@@ -830,6 +916,11 @@ void ContinuousBKI::load(const std::string& filename) {
         in.read(reinterpret_cast<char*>(&bk.z), sizeof(int));
         Block blk;
         blk.alpha.resize(block_alpha_size);
+        if (version >= 3) {
+            in.read(reinterpret_cast<char*>(&blk.last_updated), sizeof(int));
+        } else {
+            blk.last_updated = current_time_; // Assume fresh if loading old map
+        }
         in.read(reinterpret_cast<char*>(blk.alpha.data()), block_alpha_size * sizeof(float));
         int s = getShardIndex(bk);
         block_shards_[static_cast<size_t>(s)][bk] = std::move(blk);

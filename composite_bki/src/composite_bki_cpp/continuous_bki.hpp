@@ -100,6 +100,7 @@ struct Config {
 struct Block {
     // alpha stored as flat array: (((lx*B + ly)*B + lz)*K + c)
     std::vector<float> alpha;
+    int last_updated = 0;
 };
 
 // --- Main Class ---
@@ -118,7 +119,9 @@ public:
                   float alpha0 = 1.0f,
                   bool seed_osm_prior = false,
                   float osm_prior_strength = 0.0f,
-                  bool osm_fallback_in_infer = true);
+                  bool osm_fallback_in_infer = true,
+                  float lambda_min = 0.8f,
+                  float lambda_max = 0.99f);
 
     // Core Methods
     void update(const std::vector<uint32_t>& labels, const std::vector<Point3D>& points);
@@ -170,7 +173,8 @@ private:
                             const BlockKey& bk,
                             std::vector<float>& buf_m_i,
                             std::vector<float>& buf_p_super,
-                            std::vector<float>& buf_p_pred) const;
+                            std::vector<float>& buf_p_pred,
+                            int current_time) const;
     const Block* getBlockConst(const std::unordered_map<BlockKey, Block, BlockKeyHasher>& shard_map, const BlockKey& bk) const;
 
     // Prior seeding (Dirichlet base + optional OSM mapped prior)
@@ -233,6 +237,9 @@ private:
     bool seed_osm_prior_;
     float osm_prior_strength_;
     bool osm_fallback_in_infer_;
+    float lambda_min_;
+    float lambda_max_;
+    int current_time_ = 0;
 
     // Derived
     int K_pred_;

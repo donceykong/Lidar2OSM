@@ -29,7 +29,7 @@ cdef extern from "continuous_bki.hpp" namespace "continuous_bki":
     
     cdef cppclass ContinuousBKI:
         ContinuousBKI(const Config&, const OSMData&, float, float, float, float, float, bool, bool, int,
-                      float, bool, float, bool) except +
+                      float, bool, float, bool, float, float) except +
         
         void update(const vector[unsigned int]& labels, const vector[Point3D]& points) except +
         void update(const vector[vector[float]]& probs, const vector[Point3D]& points, const vector[float]& weights) except +
@@ -69,7 +69,9 @@ cdef class PyContinuousBKI:
                   float alpha0=1.0,
                   bool seed_osm_prior=False,
                   float osm_prior_strength=0.0,
-                  bool osm_fallback_in_infer=True):
+                  bool osm_fallback_in_infer=True,
+                  float lambda_min=0.8,
+                  float lambda_max=0.99):
         
         if not config_path:
             raise ValueError("config_path is required")
@@ -82,7 +84,8 @@ cdef class PyContinuousBKI:
         self.bki_ptr = new ContinuousBKI(self.config, self.osm_data,
                                          resolution, l_scale, sigma_0, prior_delta, height_sigma,
                                          use_semantic_kernel, use_spatial_kernel, num_threads,
-                                         alpha0, seed_osm_prior, osm_prior_strength, osm_fallback_in_infer)
+                                         alpha0, seed_osm_prior, osm_prior_strength, osm_fallback_in_infer,
+                                         lambda_min, lambda_max)
                                          
     def __dealloc__(self):
         if self.bki_ptr != NULL:
